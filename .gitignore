@@ -51,14 +51,14 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Audio files (optional - uncomment if you don't want to track audio files)
-# *.mp3
-# *.wav
-# *.m4a
-# *.flac
-# *.ogg
-# *.aac
-# *.wma
+# Audio files
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.wma
 
 # Output files
 output/
