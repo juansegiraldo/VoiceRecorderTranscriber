@@ -364,8 +364,8 @@ def main():
         help="Select an audio file to transcribe" + (" (M4A conversion requires FFmpeg)" if not ffmpeg_available else ""),
         label_visibility="visible"
     )
-    if uploaded_file is not None:
-        st.markdown(f'<div style="margin:0.5rem 0 0.7rem 0;font-size:1rem;color:#444;text-align:center;">📄 {uploaded_file.name} <span style=\"color:#888;font-size:0.95rem;\">{len(uploaded_file.getvalue())/1024/1024:.1f}MB</span></div>', unsafe_allow_html=True)
+    # if uploaded_file is not None:
+    #    st.markdown(f'<div style="margin:0.5rem 0 0.7rem 0;font-size:1rem;color:#444;text-align:center;">📄 {uploaded_file.name} <span style=\"color:#888;font-size:0.95rem;\">{len(uploaded_file.getvalue())/1024/1024:.1f}MB</span></div>', unsafe_allow_html=True)
     st.markdown('<div style="margin-top:1.2rem;font-size:1.1rem;font-weight:600;text-align:center;">Results</div>', unsafe_allow_html=True)
     if uploaded_file is not None:
         if st.button("🎤 Start Transcription", type="primary"):
@@ -409,7 +409,7 @@ def main():
                 status_text.text("✅ Transcription completed!")
                 st.session_state.transcription = transcription
                 st.session_state.filename = uploaded_file.name
-                st.success("🎉 Transcription completed successfully!")
+                #st.success("🎉 Transcription completed successfully!")
             except Exception as e:
                 st.error(f"❌ Error during transcription: {str(e)}")
                 progress_bar.empty()
