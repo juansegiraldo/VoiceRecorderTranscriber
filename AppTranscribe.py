@@ -245,7 +245,7 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
         
         # Check if FFmpeg is available before attempting conversion
         if not ffmpeg_available:
-            raise Exception("FFmpeg is not available. M4A conversion requires FFmpeg to be installed. Please contact the administrator to install FFmpeg on the server.")
+            raise Exception("M4A conversion is not available on this server. Please convert your M4A files to MP3 or WAV format before uploading. You can use online converters or the standalone converter script in the scripts/ folder.")
         
         # Load the audio file
         audio = AudioSegment.from_file(str(input_file), format="m4a")
@@ -259,7 +259,7 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
     except Exception as e:
         logger.error(f"Error converting {input_path}: {str(e)}")
         if "ffprobe" in str(e) or "ffmpeg" in str(e):
-            raise Exception(f"FFmpeg is not available. Please ensure FFmpeg is installed: {str(e)}")
+            raise Exception("M4A conversion is not available on this server. Please convert your M4A files to MP3 or WAV format before uploading.")
         raise e
 
 def main():
@@ -268,8 +268,8 @@ def main():
     
     # Show FFmpeg warning if not available
     if not ffmpeg_available:
-        st.warning("⚠️ FFmpeg is not available. M4A file conversion will not work. MP3 and WAV files will work normally.")
-        st.info("💡 To enable M4A support, FFmpeg needs to be installed on the server. This is being addressed.")
+        st.warning("⚠️ M4A conversion is not available on this server.")
+        st.info("💡 Please convert M4A files to MP3 or WAV format before uploading. You can use online converters or download the standalone converter from the scripts/ folder.")
     with st.sidebar:
         st.header("⚙️ Configuration")
         model = st.selectbox(
@@ -297,7 +297,7 @@ def main():
             st.markdown("""
             - MP3
             - WAV
-            - M4A (❌ FFmpeg not available)
+            - M4A (❌ Convert to MP3/WAV first)
             """)
         st.divider()
         st.subheader("📋 Instructions")
