@@ -10,6 +10,11 @@ from pydub import AudioSegment
 import math
 import time
 import io
+import logging
+
+# Set up logging for conversion
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -190,6 +195,51 @@ def transcribe_large_file(file_path: str, model: str, progress_bar=None, status_
     combined_transcription = " ".join(transcriptions)
     return combined_transcription
 
+def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate: str = "192k") -> str:
+    """
+    Convert a single M4A file to MP3 format.
+    
+    Args:
+        input_path (str): Path to the input M4A file
+        output_path (str, optional): Path for the output MP3 file. If None, 
+                                   will use the same name with .mp3 extension
+        bitrate (str): MP3 bitrate (default: "192k")
+    
+    Returns:
+        str: Path to the converted MP3 file
+    """
+    try:
+        input_file = Path(input_path)
+        
+        if not input_file.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+            
+        if not input_file.suffix.lower() == '.m4a':
+            logger.warning(f"File {input_path} doesn't have .m4a extension")
+        
+        # Determine output path
+        if output_path is None:
+            output_file = input_file.with_suffix('.mp3')
+        else:
+            output_file = Path(output_path)
+            # Ensure output directory exists
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"Converting {input_path} to {output_file}")
+        
+        # Load the audio file
+        audio = AudioSegment.from_file(str(input_file), format="m4a")
+        
+        # Export as MP3
+        audio.export(str(output_file), format="mp3", bitrate=bitrate)
+        
+        logger.info(f"Successfully converted {input_path} to {output_file}")
+        return str(output_file)
+        
+    except Exception as e:
+        logger.error(f"Error converting {input_path}: {str(e)}")
+        raise e
+
 def main():
     st.markdown('<h1 class="main-header">🎤 Voice Transcriber</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Transcribe audio files</p>', unsafe_allow_html=True)
@@ -213,6 +263,7 @@ def main():
         st.markdown("""
         - MP3
         - WAV
+        - M4A (automatically converted to MP3)
         """)
         st.divider()
         st.subheader("📋 Instructions")
@@ -227,7 +278,7 @@ def main():
         st.header("🎵 Upload Audio File")
         uploaded_file = st.file_uploader(
             "Choose an audio file",
-            type=['mp3', 'wav'],  # Only MP3 and WAV allowed
+            type=['mp3', 'wav', 'm4a'],  # MP3, WAV, and M4A allowed
             help="Select an audio file to transcribe"
         )
         if uploaded_file is not None:
@@ -249,13 +300,37 @@ def main():
                     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
                         tmp_file.write(uploaded_file.getvalue())
                         tmp_file_path = tmp_file.name
-                    transcription = transcribe_large_file(
-                        tmp_file_path, 
-                        model,
-                        progress_bar=progress_bar, 
-                        status_text=status_text
-                    )
-                    os.unlink(tmp_file_path)
+                    
+                    # Check if file is M4A and convert if needed
+                    file_extension = uploaded_file.name.split('.')[-1].lower()
+                    if file_extension == 'm4a':
+                        if status_text:
+                            status_text.text("🔄 Converting M4A to MP3...")
+                        # Create a temporary MP3 file
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                            mp3_file_path = mp3_tmp_file.name
+                        # Convert M4A to MP3
+                        converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
+                        # Clean up the original M4A temp file
+                        os.unlink(tmp_file_path)
+                        # Use the converted MP3 file for transcription
+                        transcription = transcribe_large_file(
+                            converted_path, 
+                            model,
+                            progress_bar=progress_bar, 
+                            status_text=status_text
+                        )
+                        # Clean up the converted MP3 temp file
+                        os.unlink(converted_path)
+                    else:
+                        # Direct transcription for MP3 and WAV files
+                        transcription = transcribe_large_file(
+                            tmp_file_path, 
+                            model,
+                            progress_bar=progress_bar, 
+                            status_text=status_text
+                        )
+                        os.unlink(tmp_file_path)
                     progress_bar.progress(1.0)
                     status_text.text("✅ Transcription completed!")
                     st.session_state.transcription = transcription
