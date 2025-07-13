@@ -245,7 +245,7 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
         
         # Check if FFmpeg is available before attempting conversion
         if not ffmpeg_available:
-            raise Exception("FFmpeg is not available. M4A conversion requires FFmpeg to be installed.")
+            raise Exception("FFmpeg is not available. M4A conversion requires FFmpeg to be installed. Please contact the administrator to install FFmpeg on the server.")
         
         # Load the audio file
         audio = AudioSegment.from_file(str(input_file), format="m4a")
@@ -268,7 +268,8 @@ def main():
     
     # Show FFmpeg warning if not available
     if not ffmpeg_available:
-        st.error("⚠️ FFmpeg is not available. Audio processing features may not work properly. Please ensure FFmpeg is installed.")
+        st.warning("⚠️ FFmpeg is not available. M4A file conversion will not work. MP3 and WAV files will work normally.")
+        st.info("💡 To enable M4A support, FFmpeg needs to be installed on the server. This is being addressed.")
     with st.sidebar:
         st.header("⚙️ Configuration")
         model = st.selectbox(
