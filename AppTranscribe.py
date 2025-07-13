@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 from openai import OpenAI
+import requests
 from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
@@ -63,54 +64,33 @@ st.markdown("""
 
 def split_audio_file(file_path: str, max_size_mb: int = 24) -> list[str]:
     """Split a large audio file into smaller chunks that fit within API limits."""
-    # Convert MB to bytes (leaving some buffer)
     max_size_bytes = max_size_mb * 1024 * 1024
-    
-    # Load the audio file
     audio = AudioSegment.from_file(file_path)
-    
-    # Get file size
     file_size = os.path.getsize(file_path)
-    
-    # If file is small enough, return original path
     if file_size <= max_size_bytes:
         return [file_path]
-    
-    # Calculate how many chunks we need
     num_chunks = math.ceil(file_size / max_size_bytes)
     chunk_duration = len(audio) // num_chunks
-    
-    # Create temporary directory for chunks
     temp_dir = tempfile.mkdtemp()
     chunk_paths = []
-    
     try:
         for i in range(num_chunks):
             start_time = i * chunk_duration
             end_time = start_time + chunk_duration if i < num_chunks - 1 else len(audio)
-            
-            # Extract chunk
             chunk = audio[start_time:end_time]
-            
-            # Save chunk to temporary file
             chunk_path = os.path.join(temp_dir, f"chunk_{i:03d}.mp3")
             chunk.export(chunk_path, format="mp3")
             chunk_paths.append(chunk_path)
-            
         return chunk_paths
     except Exception as e:
-        # Clean up temp directory on error
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise e
 
-def transcribe_file(path: str) -> str:
-    """Upload an audio file to OpenAI and return the transcription text."""
+def transcribe_with_openai(path: str) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY environment variable not set")
-    
     client = OpenAI(api_key=api_key)
-
     with open(path, "rb") as audio_file:
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
@@ -118,73 +98,124 @@ def transcribe_file(path: str) -> str:
         )
     return transcript.text
 
-def transcribe_large_file(file_path: str, progress_bar=None, status_text=None) -> str:
-    """Transcribe a large audio file by splitting it into chunks and combining results."""
+def transcribe_with_deepgram(path: str) -> str:
+    api_key = os.environ.get("DEEPGRAM_API_KEY")
+    if not api_key:
+        raise EnvironmentError("DEEPGRAM_API_KEY environment variable not set")
+    
+    # Try with language detection and better parameters
+    url_default = "https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&language=es&model=base"
+    headers = {
+        "Authorization": f"Token {api_key}",
+        "Content-Type": "audio/mp3",
+        "Accept": "application/json",
+    }
+    with open(path, "rb") as f:
+        audio_data = f.read()
+    response = requests.post(url_default, headers=headers, data=audio_data)
+    if not response.ok:
+        print("Deepgram error response (Spanish model):", response.text)
+        return f"Deepgram error (Spanish model): {response.text}"
+    dg = response.json()
+    print("Deepgram raw response (Spanish model):", dg)
+    transcript = dg.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+    if transcript and len(transcript.strip()) > 10:  # Only return if we have substantial text
+        return transcript
+    
+    # If Spanish model didn't work well, try with language detection
+    url_auto = "https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&detect_language=true"
+    response2 = requests.post(url_auto, headers=headers, data=audio_data)
+    if not response2.ok:
+        print("Deepgram error response (auto-detect):", response2.text)
+        return f"Deepgram error (auto-detect): {response2.text}"
+    dg2 = response2.json()
+    print("Deepgram raw response (auto-detect):", dg2)
+    transcript2 = dg2.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+    if transcript2 and len(transcript2.strip()) > 10:
+        return transcript2
+    
+    # If still no good result, try the original default model
+    url_original = "https://api.deepgram.com/v1/listen?smart_format=true"
+    response3 = requests.post(url_original, headers=headers, data=audio_data)
+    if not response3.ok:
+        print("Deepgram error response (original):", response3.text)
+        return f"Deepgram error (original): {response3.text}"
+    dg3 = response3.json()
+    print("Deepgram raw response (original):", dg3)
+    transcript3 = dg3.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+    if transcript3:
+        return transcript3
+    
+    # If all attempts failed, return debug info
+    return f"Deepgram failed to transcribe properly. Responses:\nSpanish: {dg}\nAuto-detect: {dg2}\nOriginal: {dg3}"
+
+def transcribe_file(path: str, model: str) -> str:
+    if model == "OpenAI Whisper":
+        return transcribe_with_openai(path)
+    elif model == "Deepgram":
+        return transcribe_with_deepgram(path)
+    else:
+        raise ValueError(f"Unknown model: {model}")
+
+def transcribe_large_file(file_path: str, model: str, progress_bar=None, status_text=None) -> str:
     if status_text:
         status_text.text("🔍 Analizando archivo...")
-    
-    # Split the file into chunks
     chunk_paths = split_audio_file(file_path)
-    
     if len(chunk_paths) == 1:
-        # File is small enough, process normally
         if status_text:
             status_text.text("🎤 Transcribiendo archivo...")
-        return transcribe_file(file_path)
-    
+        return transcribe_file(file_path, model)
     if status_text:
         status_text.text(f"📦 Archivo dividido en {len(chunk_paths)} chunks")
-    
-    # Process each chunk
     transcriptions = []
     temp_dir = os.path.dirname(chunk_paths[0]) if len(chunk_paths) > 1 else None
-    
     try:
         for i, chunk_path in enumerate(chunk_paths, 1):
             if status_text:
                 status_text.text(f"🎤 Procesando chunk {i}/{len(chunk_paths)}...")
             if progress_bar:
                 progress_bar.progress(i / len(chunk_paths))
-            
             try:
-                chunk_transcription = transcribe_file(chunk_path)
+                chunk_transcription = transcribe_file(chunk_path, model)
                 transcriptions.append(chunk_transcription)
                 if status_text:
                     status_text.text(f"✅ Chunk {i} procesado")
             except Exception as e:
                 if status_text:
                     status_text.text(f"❌ Error procesando chunk {i}: {str(e)}")
-                # Continue with other chunks even if one fails
                 transcriptions.append(f"[Error en chunk {i}: {str(e)}]")
     finally:
-        # Clean up temporary files
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-    
-    # Combine all transcriptions
     combined_transcription = " ".join(transcriptions)
     return combined_transcription
 
 def main():
-    # Header
     st.markdown('<h1 class="main-header">🎤 Voice Transcriber</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Transcribe audio files using OpenAI\'s Whisper API</p>', unsafe_allow_html=True)
-    
-    # Sidebar for configuration
+    st.markdown('<p class="sub-header">Transcribe audio files using OpenAI Whisper or Deepgram</p>', unsafe_allow_html=True)
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        # API Key input
-        api_key = st.text_input(
-            "OpenAI API Key",
-            type="password",
-            help="Enter your OpenAI API key. You can also set it in a .env file."
-        )
-        
-        if api_key:
-            os.environ["OPENAI_API_KEY"] = api_key
-        
-        # File size limit
+        model = st.selectbox(
+            "Transcription Model",
+            ["OpenAI Whisper", "Deepgram"],
+            help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
+        ) or "OpenAI Whisper"  # Default to OpenAI Whisper if None
+        if model == "OpenAI Whisper":
+            api_key = st.text_input(
+                "OpenAI API Key",
+                type="password",
+                help="Enter your OpenAI API key. You can also set it in a .env file."
+            )
+            if api_key:
+                os.environ["OPENAI_API_KEY"] = api_key
+        else:
+            api_key = st.text_input(
+                "Deepgram API Key",
+                type="password",
+                help="Enter your Deepgram API key. You can also set it in a .env file."
+            )
+            if api_key:
+                os.environ["DEEPGRAM_API_KEY"] = api_key
         max_file_size = st.slider(
             "Max file size (MB) for chunking",
             min_value=10,
@@ -192,10 +223,7 @@ def main():
             value=24,
             help="Files larger than this will be split into chunks"
         )
-        
         st.divider()
-        
-        # Supported formats info
         st.subheader("📁 Supported Formats")
         st.markdown("""
         - MP3
@@ -206,100 +234,72 @@ def main():
         - AAC
         - WMA
         """)
-        
         st.divider()
-        
-        # Instructions
         st.subheader("📋 Instructions")
         st.markdown("""
-        1. Upload your audio file
-        2. Wait for processing
-        3. Download the transcription
+        1. Select your preferred transcription model
+        2. Enter the corresponding API key
+        3. Upload your audio file
+        4. Wait for processing
+        5. Download the transcription
         """)
-    
-    # Main content area
     col1, col2 = st.columns([2, 1])
-    
     with col1:
         st.header("🎵 Upload Audio File")
-        
-        # File uploader
         uploaded_file = st.file_uploader(
             "Choose an audio file",
             type=['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac', 'wma'],
             help="Select an audio file to transcribe"
         )
-        
         if uploaded_file is not None:
-            # Display file info
             file_size = len(uploaded_file.getvalue())
             file_size_mb = file_size / (1024 * 1024)
-            
             st.info(f"📄 File: {uploaded_file.name}")
             st.info(f"📏 Size: {file_size_mb:.2f} MB")
-            
-            # Transcribe button
+            st.info(f"🤖 Model: {model}")
             if st.button("🎤 Start Transcription", type="primary"):
-                # Check API key
-                if not os.environ.get("OPENAI_API_KEY"):
+                if model == "OpenAI Whisper" and not os.environ.get("OPENAI_API_KEY"):
                     st.error("❌ OpenAI API key not found. Please enter it in the sidebar.")
                     return
-                
-                # Create progress elements
+                elif model == "Deepgram" and not os.environ.get("DEEPGRAM_API_KEY"):
+                    st.error("❌ Deepgram API key not found. Please enter it in the sidebar.")
+                    return
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 try:
-                    # Save uploaded file to temporary location
                     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
                         tmp_file.write(uploaded_file.getvalue())
                         tmp_file_path = tmp_file.name
-                    
-                    # Transcribe the file
                     transcription = transcribe_large_file(
                         tmp_file_path, 
+                        model,
                         progress_bar=progress_bar, 
                         status_text=status_text
                     )
-                    
-                    # Clean up temporary file
                     os.unlink(tmp_file_path)
-                    
-                    # Update progress to 100%
                     progress_bar.progress(1.0)
                     status_text.text("✅ Transcription completed!")
-                    
-                    # Store transcription in session state
                     st.session_state.transcription = transcription
                     st.session_state.filename = uploaded_file.name
-                    
+                    st.session_state.model = model
                     st.success("🎉 Transcription completed successfully!")
-                    
                 except Exception as e:
                     st.error(f"❌ Error during transcription: {str(e)}")
                     progress_bar.empty()
                     status_text.empty()
-    
     with col2:
         st.header("📝 Results")
-        
         if 'transcription' in st.session_state:
-            # Display transcription
             st.subheader(f"Transcription: {st.session_state.filename}")
-            
-            # Text area for transcription
+            st.caption(f"Model: {st.session_state.model}")
             transcription_text = st.text_area(
                 "Transcription",
                 value=st.session_state.transcription,
                 height=300,
                 help="The transcribed text from your audio file"
             )
-            
-            # Download button
             if transcription_text:
-                # Create download data
                 download_data = transcription_text.encode('utf-8')
-                
                 st.download_button(
                     label="📥 Download Transcription",
                     data=download_data,
@@ -307,19 +307,15 @@ def main():
                     mime="text/plain",
                     help="Download the transcription as a text file"
                 )
-                
-                # Copy to clipboard button
                 if st.button("📋 Copy to Clipboard"):
                     st.write("📋 Copied to clipboard!")
                     st.code(transcription_text)
         else:
             st.info("👆 Upload a file and start transcription to see results here")
-    
-    # Footer
     st.divider()
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>Powered by OpenAI Whisper API | Built with Streamlit</p>
+        <p>Powered by OpenAI Whisper API & Deepgram | Built with Streamlit</p>
     </div>
     """, unsafe_allow_html=True)
 
