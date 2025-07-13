@@ -19,6 +19,22 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
+# Check for FFmpeg availability
+def check_ffmpeg():
+    """Check if FFmpeg is available for audio processing."""
+    try:
+        from pydub import AudioSegment
+        # Try to load a simple audio file to test FFmpeg
+        test_audio = AudioSegment.silent(duration=100)
+        return True
+    except Exception as e:
+        if "ffprobe" in str(e) or "ffmpeg" in str(e):
+            return False
+        return True
+
+# Check FFmpeg at startup
+ffmpeg_available = check_ffmpeg()
+
 # Page configuration
 st.set_page_config(
     page_title="Voice Transcriber",
@@ -238,11 +254,17 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
         
     except Exception as e:
         logger.error(f"Error converting {input_path}: {str(e)}")
+        if "ffprobe" in str(e) or "ffmpeg" in str(e):
+            raise Exception(f"FFmpeg is not available. Please ensure FFmpeg is installed: {str(e)}")
         raise e
 
 def main():
     st.markdown('<h1 class="main-header">🎤 Voice Transcriber</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Transcribe audio files</p>', unsafe_allow_html=True)
+    
+    # Show FFmpeg warning if not available
+    if not ffmpeg_available:
+        st.error("⚠️ FFmpeg is not available. Audio processing features may not work properly. Please ensure FFmpeg is installed.")
     with st.sidebar:
         st.header("⚙️ Configuration")
         model = st.selectbox(
