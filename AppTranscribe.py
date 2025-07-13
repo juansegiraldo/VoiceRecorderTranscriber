@@ -159,31 +159,31 @@ def transcribe_file(path: str, model: str) -> str:
 
 def transcribe_large_file(file_path: str, model: str, progress_bar=None, status_text=None) -> str:
     if status_text:
-        status_text.text("🔍 Analizando archivo...")
+        status_text.text("🔍 Analyzing file...")
     chunk_paths = split_audio_file(file_path)
     if len(chunk_paths) == 1:
         if status_text:
-            status_text.text("🎤 Transcribiendo archivo...")
+            status_text.text("🎤 Transcribing file...")
         return transcribe_file(file_path, model)
     if status_text:
-        status_text.text(f"📦 Archivo dividido en {len(chunk_paths)} chunks")
+        status_text.text(f"📦 File split into {len(chunk_paths)} chunks")
     transcriptions = []
     temp_dir = os.path.dirname(chunk_paths[0]) if len(chunk_paths) > 1 else None
     try:
         for i, chunk_path in enumerate(chunk_paths, 1):
             if status_text:
-                status_text.text(f"🎤 Procesando chunk {i}/{len(chunk_paths)}...")
+                status_text.text(f"🎤 Processing chunk {i}/{len(chunk_paths)}...")
             if progress_bar:
                 progress_bar.progress(i / len(chunk_paths))
             try:
                 chunk_transcription = transcribe_file(chunk_path, model)
                 transcriptions.append(chunk_transcription)
                 if status_text:
-                    status_text.text(f"✅ Chunk {i} procesado")
+                    status_text.text(f"✅ Chunk {i} processed")
             except Exception as e:
                 if status_text:
-                    status_text.text(f"❌ Error procesando chunk {i}: {str(e)}")
-                transcriptions.append(f"[Error en chunk {i}: {str(e)}]")
+                    status_text.text(f"❌ Error processing chunk {i}: {str(e)}")
+                transcriptions.append(f"[Error in chunk {i}: {str(e)}]")
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
@@ -192,30 +192,15 @@ def transcribe_large_file(file_path: str, model: str, progress_bar=None, status_
 
 def main():
     st.markdown('<h1 class="main-header">🎤 Voice Transcriber</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Transcribe audio files using OpenAI Whisper or Deepgram</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Transcribe audio files</p>', unsafe_allow_html=True)
     with st.sidebar:
         st.header("⚙️ Configuration")
         model = st.selectbox(
             "Transcription Model",
-            ["OpenAI Whisper", "Deepgram"],
+            ["Deepgram", "OpenAI Whisper"],  # Deepgram is now first (default)
             help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
-        ) or "OpenAI Whisper"  # Default to OpenAI Whisper if None
-        if model == "OpenAI Whisper":
-            api_key = st.text_input(
-                "OpenAI API Key",
-                type="password",
-                help="Enter your OpenAI API key. You can also set it in a .env file."
-            )
-            if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
-        else:
-            api_key = st.text_input(
-                "Deepgram API Key",
-                type="password",
-                help="Enter your Deepgram API key. You can also set it in a .env file."
-            )
-            if api_key:
-                os.environ["DEEPGRAM_API_KEY"] = api_key
+        ) or "Deepgram"  # Default to Deepgram if None
+        # API key input fields removed; only environment variables are used
         max_file_size = st.slider(
             "Max file size (MB) for chunking",
             min_value=10,
@@ -228,27 +213,21 @@ def main():
         st.markdown("""
         - MP3
         - WAV
-        - M4A
-        - FLAC
-        - OGG
-        - AAC
-        - WMA
         """)
         st.divider()
         st.subheader("📋 Instructions")
         st.markdown("""
         1. Select your preferred transcription model
-        2. Enter the corresponding API key
-        3. Upload your audio file
-        4. Wait for processing
-        5. Download the transcription
+        2. Upload your audio file
+        3. Wait for processing
+        4. Download the transcription
         """)
     col1, col2 = st.columns([2, 1])
     with col1:
         st.header("🎵 Upload Audio File")
         uploaded_file = st.file_uploader(
             "Choose an audio file",
-            type=['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac', 'wma'],
+            type=['mp3', 'wav'],  # Only MP3 and WAV allowed
             help="Select an audio file to transcribe"
         )
         if uploaded_file is not None:
@@ -259,10 +238,10 @@ def main():
             st.info(f"🤖 Model: {model}")
             if st.button("🎤 Start Transcription", type="primary"):
                 if model == "OpenAI Whisper" and not os.environ.get("OPENAI_API_KEY"):
-                    st.error("❌ OpenAI API key not found. Please enter it in the sidebar.")
+                    st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
                     return
                 elif model == "Deepgram" and not os.environ.get("DEEPGRAM_API_KEY"):
-                    st.error("❌ Deepgram API key not found. Please enter it in the sidebar.")
+                    st.error("❌ Deepgram API key not found. Please enter it in a .env file.")
                     return
                 progress_bar = st.progress(0)
                 status_text = st.empty()
