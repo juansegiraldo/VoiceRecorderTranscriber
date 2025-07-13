@@ -11,6 +11,13 @@ import math
 import time
 import io
 import logging
+import imageio_ffmpeg
+
+# Patch pydub to use imageio-ffmpeg's bundled ffmpeg/ffprobe
+ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+from pydub.utils import which
+AudioSegment.converter = ffmpeg_path
+AudioSegment.ffmpeg = ffmpeg_path
 
 # Set up logging for conversion
 logging.basicConfig(level=logging.INFO)
