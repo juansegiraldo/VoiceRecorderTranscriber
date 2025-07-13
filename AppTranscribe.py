@@ -6,11 +6,21 @@ from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
 import shutil
-from pydub import AudioSegment
 import math
 import time
 import io
 import logging
+import imageio_ffmpeg
+
+# Patch pydub to use imageio-ffmpeg's bundled ffmpeg/ffprobe BEFORE importing AudioSegment
+ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+print(f"Using FFmpeg from: {ffmpeg_path}")
+from pydub.utils import which
+from pydub import AudioSegment
+AudioSegment.converter = ffmpeg_path
+AudioSegment.ffmpeg = ffmpeg_path
+print(f"Patched AudioSegment.converter to: {AudioSegment.converter}")
+print(f"Patched AudioSegment.ffmpeg to: {AudioSegment.ffmpeg}")
 
 # Set up logging for conversion
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Check for FFmpeg availability
+def check_ffmpeg():
+    """Check if FFmpeg is available for audio processing."""
+    try:
+        from pydub import AudioSegment
+        # Try to load a simple audio file to test FFmpeg
+        test_audio = AudioSegment.silent(duration=100)
+        return True
+    except Exception as e:
+        if "ffprobe" in str(e) or "ffmpeg" in str(e):
+            return False
+        return True
+
+# Check FFmpeg at startup
+ffmpeg_available = check_ffmpeg()
 
 # Page configuration
 st.set_page_config(
@@ -227,6 +253,10 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
         
         logger.info(f"Converting {input_path} to {output_file}")
         
+        # Check if FFmpeg is available before attempting conversion
+        if not ffmpeg_available:
+            raise Exception("M4A conversion is not available on this server. Please convert your M4A files to MP3 or WAV format before uploading. You can use online converters or the standalone converter script in the scripts/ folder.")
+        
         # Load the audio file
         audio = AudioSegment.from_file(str(input_file), format="m4a")
         
@@ -238,140 +268,206 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
         
     except Exception as e:
         logger.error(f"Error converting {input_path}: {str(e)}")
+        if "ffprobe" in str(e) or "ffmpeg" in str(e):
+            raise Exception("M4A conversion is not available on this server. Please convert your M4A files to MP3 or WAV format before uploading.")
         raise e
 
 def main():
-    st.markdown('<h1 class="main-header">🎤 Voice Transcriber</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Transcribe audio files</p>', unsafe_allow_html=True)
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        model = st.selectbox(
-            "Transcription Model",
-            ["Deepgram", "OpenAI Whisper"],  # Deepgram is now first (default)
-            help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
-        ) or "Deepgram"  # Default to Deepgram if None
-        # API key input fields removed; only environment variables are used
-        max_file_size = st.slider(
-            "Max file size (MB) for chunking",
-            min_value=10,
-            max_value=50,
-            value=24,
-            help="Files larger than this will be split into chunks"
+    st.markdown(
+        '''<style>
+        body, .main, .block-container {
+            background: #fafbfc !important;
+        }
+        .block-container {
+            max-width: 720px !important; /* Increased from 540px to ~33% wider */
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (max-width: 900px) {
+            .block-container {
+                max-width: 98vw !important;
+                padding: 0.5rem !important;
+            }
+        }
+        .mobile-card {
+            background: #fff;
+            border-radius: 1.5rem;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.07);
+            padding: 2rem 1.2rem 1.5rem 1.2rem;
+            margin-bottom: 1.5rem;
+        }
+        .mobile-header {
+            font-size: 2.2rem;
+            font-weight: 800;
+            text-align: left;
+            margin-bottom: 0.2rem;
+            letter-spacing: -1px;
+        }
+        .mobile-sub {
+            color: #888;
+            font-size: 1.1rem;
+            margin-bottom: 1.2rem;
+        }
+        .mobile-search {
+            display: flex;
+            align-items: center;
+            background: #f3f4f6;
+            border-radius: 1.2rem;
+            padding: 0.7rem 1.2rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid #e5e7eb;
+        }
+        .mobile-search input {
+            border: none;
+            background: transparent;
+            outline: none;
+            font-size: 1.1rem;
+            width: 100%;
+        }
+        .mobile-section-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin-bottom: 0.7rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .mobile-instructions li {
+            margin-bottom: 0.5rem;
+        }
+        @media (max-width: 600px) {
+            .block-container {
+                max-width: 100% !important;
+                padding: 0.5rem !important;
+            }
+            .mobile-card {
+                padding: 1.2rem 0.5rem 1rem 0.5rem;
+            }
+            .mobile-header {
+                font-size: 1.4rem;
+            }
+        }
+        </style>''', unsafe_allow_html=True)
+
+    # Logo and App Name (centered, no bubble)
+    st.markdown('<div style="text-align:center;margin-bottom:1.2rem;"><span style="font-size:2.2rem;">🎤</span><div style="font-size:2rem;font-weight:700;margin-top:0.5rem;">Voice Transcriber</div></div>', unsafe_allow_html=True)
+
+    # Transcription Section
+    st.markdown('<div style="font-size:1.3rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Insert audio file</div>', unsafe_allow_html=True)
+    # st.markdown('<div style="text-align:center;">Choose an audio file</div>', unsafe_allow_html=True)
+    allowed_types = ['mp3', 'wav']
+    if ffmpeg_available:
+        allowed_types.append('m4a')
+    uploaded_file = st.file_uploader(
+        "",
+        type=allowed_types,
+        help="Select an audio file to transcribe" + (" (M4A conversion requires FFmpeg)" if not ffmpeg_available else ""),
+        label_visibility="visible"
+    )
+    if uploaded_file is not None:
+        st.markdown(f'<div style="margin:0.5rem 0 0.7rem 0;font-size:1rem;color:#444;text-align:center;">📄 {uploaded_file.name} <span style=\"color:#888;font-size:0.95rem;\">{len(uploaded_file.getvalue())/1024/1024:.1f}MB</span></div>', unsafe_allow_html=True)
+    st.markdown('<div style="margin-top:1.2rem;font-size:1.1rem;font-weight:600;text-align:center;">Results</div>', unsafe_allow_html=True)
+    if uploaded_file is not None:
+        if st.button("🎤 Start Transcription", type="primary"):
+            model = st.session_state.get('model', 'Deepgram')
+            if model == "OpenAI Whisper" and not os.environ.get("OPENAI_API_KEY"):
+                st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
+                return
+            elif model == "Deepgram" and not os.environ.get("DEEPGRAM_API_KEY"):
+                st.error("❌ Deepgram API key not found. Please enter it in a .env file.")
+                return
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_file_path = tmp_file.name
+                file_extension = uploaded_file.name.split('.')[-1].lower()
+                if file_extension == 'm4a':
+                    if status_text:
+                        status_text.text("🔄 Converting M4A to MP3...")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                        mp3_file_path = mp3_tmp_file.name
+                    converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
+                    os.unlink(tmp_file_path)
+                    transcription = transcribe_large_file(
+                        converted_path, 
+                        st.session_state.get('model', 'Deepgram'),
+                        progress_bar=progress_bar, 
+                        status_text=status_text,
+                    )
+                    os.unlink(converted_path)
+                else:
+                    transcription = transcribe_large_file(
+                        tmp_file_path, 
+                        st.session_state.get('model', 'Deepgram'),
+                        progress_bar=progress_bar, 
+                        status_text=status_text,
+                    )
+                    os.unlink(tmp_file_path)
+                progress_bar.progress(1.0)
+                status_text.text("✅ Transcription completed!")
+                st.session_state.transcription = transcription
+                st.session_state.filename = uploaded_file.name
+                st.success("🎉 Transcription completed successfully!")
+            except Exception as e:
+                st.error(f"❌ Error during transcription: {str(e)}")
+                progress_bar.empty()
+                status_text.empty()
+    # Remove or comment out the following line to eliminate the empty frame/space:
+    # st.markdown('<div style="margin-top:0.7rem;"></div>', unsafe_allow_html=True)
+    # Show the bordered frame for transcription and controls only if there is a transcription
+    if 'transcription' in st.session_state:
+        
+        transcription_text = st.text_area(
+            "",
+            value=st.session_state.transcription,
+            height=120,
+            help="The transcribed text from your audio file",
+            label_visibility="visible"
         )
-        st.divider()
-        st.subheader("📁 Supported Formats")
-        st.markdown("""
-        - MP3
-        - WAV
-        - M4A (automatically converted to MP3)
-        """)
-        st.divider()
-        st.subheader("📋 Instructions")
-        st.markdown("""
-        1. Select your preferred transcription model
-        2. Upload your audio file
-        3. Wait for processing
-        4. Download the transcription
-        """)
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.header("🎵 Upload Audio File")
-        uploaded_file = st.file_uploader(
-            "Choose an audio file",
-            type=['mp3', 'wav', 'm4a'],  # MP3, WAV, and M4A allowed
-            help="Select an audio file to transcribe"
-        )
-        if uploaded_file is not None:
-            file_size = len(uploaded_file.getvalue())
-            file_size_mb = file_size / (1024 * 1024)
-            st.info(f"📄 File: {uploaded_file.name}")
-            st.info(f"📏 Size: {file_size_mb:.2f} MB")
-            st.info(f"🤖 Model: {model}")
-            if st.button("🎤 Start Transcription", type="primary"):
-                if model == "OpenAI Whisper" and not os.environ.get("OPENAI_API_KEY"):
-                    st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
-                    return
-                elif model == "Deepgram" and not os.environ.get("DEEPGRAM_API_KEY"):
-                    st.error("❌ Deepgram API key not found. Please enter it in a .env file.")
-                    return
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
-                        tmp_file.write(uploaded_file.getvalue())
-                        tmp_file_path = tmp_file.name
-                    
-                    # Check if file is M4A and convert if needed
-                    file_extension = uploaded_file.name.split('.')[-1].lower()
-                    if file_extension == 'm4a':
-                        if status_text:
-                            status_text.text("🔄 Converting M4A to MP3...")
-                        # Create a temporary MP3 file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
-                            mp3_file_path = mp3_tmp_file.name
-                        # Convert M4A to MP3
-                        converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
-                        # Clean up the original M4A temp file
-                        os.unlink(tmp_file_path)
-                        # Use the converted MP3 file for transcription
-                        transcription = transcribe_large_file(
-                            converted_path, 
-                            model,
-                            progress_bar=progress_bar, 
-                            status_text=status_text
-                        )
-                        # Clean up the converted MP3 temp file
-                        os.unlink(converted_path)
-                    else:
-                        # Direct transcription for MP3 and WAV files
-                        transcription = transcribe_large_file(
-                            tmp_file_path, 
-                            model,
-                            progress_bar=progress_bar, 
-                            status_text=status_text
-                        )
-                        os.unlink(tmp_file_path)
-                    progress_bar.progress(1.0)
-                    status_text.text("✅ Transcription completed!")
-                    st.session_state.transcription = transcription
-                    st.session_state.filename = uploaded_file.name
-                    st.session_state.model = model
-                    st.success("🎉 Transcription completed successfully!")
-                except Exception as e:
-                    st.error(f"❌ Error during transcription: {str(e)}")
-                    progress_bar.empty()
-                    status_text.empty()
-    with col2:
-        st.header("📝 Results")
-        if 'transcription' in st.session_state:
-            st.subheader(f"Transcription: {st.session_state.filename}")
-            st.caption(f"Model: {st.session_state.model}")
-            transcription_text = st.text_area(
-                "Transcription",
-                value=st.session_state.transcription,
-                height=300,
-                help="The transcribed text from your audio file"
+        st.markdown('<div style="height:0.5rem;"></div>', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            download_data = st.session_state.transcription.encode('utf-8')
+            st.download_button(
+                label="Download",
+                data=download_data,
+                file_name=f"{st.session_state.filename.split('.')[0]}_transcript.txt",
+                mime="text/plain",
+                help="Download the transcription as a text file"
             )
-            if transcription_text:
-                download_data = transcription_text.encode('utf-8')
-                st.download_button(
-                    label="📥 Download Transcription",
-                    data=download_data,
-                    file_name=f"{st.session_state.filename.split('.')[0]}_transcript.txt",
-                    mime="text/plain",
-                    help="Download the transcription as a text file"
-                )
-                if st.button("📋 Copy to Clipboard"):
-                    st.write("📋 Copied to clipboard!")
-                    st.code(transcription_text)
-        else:
-            st.info("👆 Upload a file and start transcription to see results here")
-    st.divider()
-    st.markdown("""
-    <div style='text-align: center; color: #666;'>
-        <p>Powered by OpenAI Whisper API & Deepgram | Built with Streamlit</p>
-    </div>
-    """, unsafe_allow_html=True)
+        with col2:
+            if st.button("Copy to clipboard"):
+                st.write("📋 Copied to clipboard!")
+                st.code(st.session_state.transcription)
+        st.markdown('</div>', unsafe_allow_html=True)
+    # If no transcription, do not show the frame, placeholder, or empty text area
+
+    # Model Selector (subtitle + select box, no bubble)
+    # st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-top:1.5rem;margin-bottom:0.5rem;">Model</div>', unsafe_allow_html=True)
+    model = st.selectbox(
+        "Transcription Model",
+        ["Deepgram", "OpenAI Whisper"],
+        key='model',
+        help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
+    )
+
+    # Other Info (polished, centered, no bubble)
+    st.markdown('<hr style="margin:1.5rem 0 1rem 0;">', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:1.1rem;font-weight:600;text-align:center;">About this app</div>',
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        '<div style="font-size:1rem;line-height:1.6;text-align:center;">'
+        'Supported formats: <b>MP3, WAV, M4A</b>.<br>'
+        'File chunking is automatic (max size: 24MB per chunk).<br>'
+        'Created by <b>Juan Giraldo</b>.<br>'
+        'Powered by <b>Streamlit</b>, <b>Deepgram</b>, and <b>OpenAI</b>.'
+        '</div>',
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main() 

@@ -63,6 +63,7 @@ Thumbs.db
 # Output files
 output/
 *.txt
+!packages.txt
 
 # Temporary files
 temp/
