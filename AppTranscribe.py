@@ -45,6 +45,56 @@ def check_ffmpeg():
 # Check FFmpeg at startup
 ffmpeg_available = check_ffmpeg()
 
+def format_time(seconds):
+    """Convert seconds to MM:SS format."""
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+def format_time_ms(milliseconds):
+    """Convert milliseconds to MM:SS format."""
+    return format_time(milliseconds / 1000)
+
+def trim_audio_file(input_path: str, start_time_ms: int, end_time_ms: int, output_path: str | None = None) -> str:
+    """
+    Trim an audio file to the specified time range.
+    
+    Args:
+        input_path (str): Path to the input audio file
+        start_time_ms (int): Start time in milliseconds
+        end_time_ms (int): End time in milliseconds
+        output_path (str, optional): Path for the output file. If None, 
+                                   will create a temporary file
+    
+    Returns:
+        str: Path to the trimmed audio file
+    """
+    try:
+        # Load the audio file
+        audio = AudioSegment.from_file(input_path)
+        
+        # Ensure times are within bounds
+        start_time_ms = max(0, min(start_time_ms, len(audio)))
+        end_time_ms = max(start_time_ms, min(end_time_ms, len(audio)))
+        
+        # Trim the audio
+        trimmed_audio = audio[start_time_ms:end_time_ms]
+        
+        # Determine output path
+        if output_path is None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                output_path = tmp_file.name
+        
+        # Export the trimmed audio
+        trimmed_audio.export(output_path, format="mp3")
+        
+        logger.info(f"Successfully trimmed {input_path} from {format_time_ms(start_time_ms)} to {format_time_ms(end_time_ms)}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Error trimming {input_path}: {str(e)}")
+        raise e
+
 # Page configuration
 st.set_page_config(
     page_title="Voice Transcriber",
@@ -364,8 +414,86 @@ def main():
         help="Select an audio file to transcribe" + (" (M4A conversion requires FFmpeg)" if not ffmpeg_available else ""),
         label_visibility="visible"
     )
-    # if uploaded_file is not None:
-    #    st.markdown(f'<div style="margin:0.5rem 0 0.7rem 0;font-size:1rem;color:#444;text-align:center;">📄 {uploaded_file.name} <span style=\"color:#888;font-size:0.95rem;\">{len(uploaded_file.getvalue())/1024/1024:.1f}MB</span></div>', unsafe_allow_html=True)
+    
+    # Audio trimming section
+    trim_settings = None
+    if uploaded_file is not None:
+        # Show file info
+        #st.markdown(f'<div style="margin:0.5rem 0 0.7rem 0;font-size:1rem;color:#444;text-align:center;">📄 {uploaded_file.name} <span style="color:#888;font-size:0.95rem;">{len(uploaded_file.getvalue())/1024/1024:.1f}MB</span></div>', unsafe_allow_html=True)
+        
+        # Check if we need to load audio info (only if file changed or not cached)
+        file_key = f"{uploaded_file.name}_{uploaded_file.size}_{uploaded_file.type}"
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        file_changed = (
+            st.session_state.get('current_file_key') != file_key or
+            (file_extension == 'm4a' and st.session_state.get('converted_mp3_file_key') != file_key)
+        )
+        if file_changed:
+            try:
+                # Create a temporary file for duration analysis
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_file_path = tmp_file.name
+                if file_extension == 'm4a':
+                    with st.spinner("🔄 Converting M4A to MP3..."):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                            mp3_file_path = mp3_tmp_file.name
+                        converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_tmp_file.name)
+                        os.unlink(tmp_file_path)
+                        audio_path = converted_path
+                        st.session_state.converted_mp3_path = audio_path
+                        st.session_state.converted_mp3_file_key = file_key
+                else:
+                    audio_path = tmp_file_path
+                    st.session_state.converted_mp3_path = None
+                    st.session_state.converted_mp3_file_key = None
+                audio = AudioSegment.from_file(audio_path)
+                duration_ms = len(audio)
+                duration_seconds = duration_ms / 1000
+                if file_extension != 'm4a':
+                    os.unlink(audio_path)
+                st.session_state.audio_info = {
+                    'duration_ms': duration_ms,
+                    'duration_seconds': duration_seconds
+                }
+                st.session_state.current_file_key = file_key
+            except Exception as e:
+                st.error(f"❌ Error loading audio file: {str(e)}")
+                trim_settings = None
+                return
+        audio_info = st.session_state.audio_info
+        duration_seconds = audio_info['duration_seconds']
+        
+        # Show audio info
+        st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">🎵 Duration: {format_time(duration_seconds)}</div>', unsafe_allow_html=True)
+        
+        # Trimming controls
+        st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Audio Trimming (Optional)</div>', unsafe_allow_html=True)
+        
+        # Use a single range slider for start and end time
+        trim_range = st.slider(
+            "Select audio range to transcribe",
+            min_value=0.0,
+            max_value=float(duration_seconds),
+            value=(0.0, float(duration_seconds)),
+            step=0.1,
+            format="%.1f s",
+            help="Select the portion of the audio to transcribe (start and end times)",
+            key="trim_range_slider"
+        )
+        start_time, end_time = trim_range
+        
+        # Show trim preview
+        trim_duration = end_time - start_time
+        st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">✂️ Will transcribe: {format_time(start_time)} - {format_time(end_time)} ({format_time(trim_duration)} total)</div>', unsafe_allow_html=True)
+        
+        # Store trim settings
+        trim_settings = {
+            'start_time_ms': int(start_time * 1000),
+            'end_time_ms': int(end_time * 1000),
+            'duration_ms': audio_info['duration_ms']
+        }
+    
     st.markdown('<div style="margin-top:1.2rem;font-size:1.1rem;font-weight:600;text-align:center;">Results</div>', unsafe_allow_html=True)
     if uploaded_file is not None:
         if st.button("🎤 Start Transcription", type="primary"):
@@ -379,32 +507,66 @@ def main():
             progress_bar = st.progress(0)
             status_text = st.empty()
             try:
+                # Create a fresh temporary file for transcription
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
                 file_extension = uploaded_file.name.split('.')[-1].lower()
-                if file_extension == 'm4a':
+                temp_files_to_cleanup = [tmp_file_path]
+                # Use cached MP3 if available
+                audio_path: str = tmp_file_path  # Default
+                if file_extension == 'm4a' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
+                    if st.session_state.converted_mp3_path is not None:
+                        audio_path = st.session_state.converted_mp3_path
+                elif file_extension == 'm4a':
                     if status_text:
                         status_text.text("🔄 Converting M4A to MP3...")
+                    time.sleep(0.5)
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
                         mp3_file_path = mp3_tmp_file.name
                     converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
-                    os.unlink(tmp_file_path)
+                    temp_files_to_cleanup.append(converted_path)
+                    audio_path = converted_path
+                # Apply trimming if settings are provided
+                if trim_settings and (trim_settings['start_time_ms'] > 0 or trim_settings['end_time_ms'] < trim_settings['duration_ms']):
+                    if status_text:
+                        status_text.text("✂️ Trimming audio...")
+                    if audio_path is not None:
+                        trimmed_path = trim_audio_file(
+                            audio_path,
+                            trim_settings['start_time_ms'],
+                            trim_settings['end_time_ms']
+                        )
+                        temp_files_to_cleanup.append(trimmed_path)
+                        audio_path = trimmed_path
+                if audio_path is not None:
                     transcription = transcribe_large_file(
-                        converted_path, 
+                        audio_path, 
                         st.session_state.get('model', 'Deepgram'),
                         progress_bar=progress_bar, 
                         status_text=status_text,
                     )
-                    os.unlink(converted_path)
                 else:
-                    transcription = transcribe_large_file(
-                        tmp_file_path, 
-                        st.session_state.get('model', 'Deepgram'),
-                        progress_bar=progress_bar, 
-                        status_text=status_text,
-                    )
-                    os.unlink(tmp_file_path)
+                    st.error("❌ Internal error: audio_path is None.")
+                    return
+                # Clean up all temp files (including cached mp3 after use)
+                for temp_file in temp_files_to_cleanup:
+                    try:
+                        if temp_file and isinstance(temp_file, str) and os.path.exists(temp_file):
+                            os.unlink(temp_file)
+                    except Exception as e:
+                        logger.warning(f"Could not delete temp file {temp_file}: {e}")
+                # If we used the cached mp3, clean it up now
+                if file_extension == 'm4a' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
+                    try:
+                        cached_mp3 = st.session_state.converted_mp3_path
+                        if cached_mp3 and isinstance(cached_mp3, str) and os.path.exists(cached_mp3):
+                            os.unlink(cached_mp3)
+                    except Exception as e:
+                        logger.warning(f"Could not delete cached mp3 file {cached_mp3}: {e}")
+                    st.session_state.converted_mp3_path = None
+                    st.session_state.converted_mp3_file_key = None
+                
                 progress_bar.progress(1.0)
                 status_text.text("✅ Transcription completed!")
                 st.session_state.transcription = transcription
@@ -462,7 +624,7 @@ def main():
     st.markdown(
         '<div style="font-size:1rem;line-height:1.6;text-align:center;">'
         'Supported formats: <b>MP3, WAV, M4A</b>.<br>'
-        'File chunking is automatic (max size: 24MB per chunk).<br>'
+        'Audio trimming and file chunking are automatic.<br>'
         'Created by <b>Juan Giraldo</b>.<br>'
         'Powered by <b>Streamlit</b>, <b>Deepgram</b>, and <b>OpenAI</b>.'
         '</div>',
