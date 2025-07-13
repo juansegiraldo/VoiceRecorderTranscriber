@@ -243,6 +243,10 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
         
         logger.info(f"Converting {input_path} to {output_file}")
         
+        # Check if FFmpeg is available before attempting conversion
+        if not ffmpeg_available:
+            raise Exception("FFmpeg is not available. M4A conversion requires FFmpeg to be installed.")
+        
         # Load the audio file
         audio = AudioSegment.from_file(str(input_file), format="m4a")
         
@@ -282,11 +286,18 @@ def main():
         )
         st.divider()
         st.subheader("📁 Supported Formats")
-        st.markdown("""
-        - MP3
-        - WAV
-        - M4A (automatically converted to MP3)
-        """)
+        if ffmpeg_available:
+            st.markdown("""
+            - MP3
+            - WAV
+            - M4A (automatically converted to MP3)
+            """)
+        else:
+            st.markdown("""
+            - MP3
+            - WAV
+            - M4A (❌ FFmpeg not available)
+            """)
         st.divider()
         st.subheader("📋 Instructions")
         st.markdown("""
@@ -298,10 +309,15 @@ def main():
     col1, col2 = st.columns([2, 1])
     with col1:
         st.header("🎵 Upload Audio File")
+        # Determine allowed file types based on FFmpeg availability
+        allowed_types = ['mp3', 'wav']
+        if ffmpeg_available:
+            allowed_types.append('m4a')
+        
         uploaded_file = st.file_uploader(
             "Choose an audio file",
-            type=['mp3', 'wav', 'm4a'],  # MP3, WAV, and M4A allowed
-            help="Select an audio file to transcribe"
+            type=allowed_types,
+            help="Select an audio file to transcribe" + (" (M4A conversion requires FFmpeg)" if not ffmpeg_available else "")
         )
         if uploaded_file is not None:
             file_size = len(uploaded_file.getvalue())
