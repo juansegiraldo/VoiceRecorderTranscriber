@@ -11,6 +11,7 @@ import time
 import io
 import logging
 import imageio_ffmpeg
+import subprocess
 
 # Patch pydub to use imageio-ffmpeg's bundled ffmpeg/ffprobe BEFORE importing AudioSegment
 ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -408,10 +409,11 @@ def main():
     allowed_types = ['mp3', 'wav']
     if ffmpeg_available:
         allowed_types.append('m4a')
+        allowed_types.append('mp4')
     uploaded_file = st.file_uploader(
         "",
         type=allowed_types,
-        help="Select an audio file to transcribe" + (" (M4A conversion requires FFmpeg)" if not ffmpeg_available else ""),
+        help="Select an audio file to transcribe (MP3, WAV, M4A, MP4)" + (" (M4A/MP4 extraction requires FFmpeg)" if not ffmpeg_available else ""),
         label_visibility="visible"
     )
     
@@ -443,6 +445,26 @@ def main():
                         audio_path = converted_path
                         st.session_state.converted_mp3_path = audio_path
                         st.session_state.converted_mp3_file_key = file_key
+                elif file_extension == 'mp4':
+                    with st.spinner("🔄 Extracting audio from MP4..."):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                            mp3_file_path = mp3_tmp_file.name
+                        # Use ffmpeg to extract audio from MP4
+                        # This requires ffmpeg to be installed and in PATH
+                        if not ffmpeg_available:
+                            raise Exception("MP4 extraction requires FFmpeg. Please ensure it's installed and in your PATH.")
+                        cmd = f"ffmpeg -i {tmp_file_path} -vn -acodec libmp3lame -ab 192k -ar 44100 -y {mp3_file_path}"
+                        try:
+                            subprocess.run(cmd, shell=True, check=True)
+                            audio_path = mp3_file_path
+                            st.session_state.converted_mp3_path = audio_path
+                            st.session_state.converted_mp3_file_key = file_key
+                        except subprocess.CalledProcessError as e:
+                            logger.error(f"Error extracting audio from MP4: {e}")
+                            raise Exception(f"Error extracting audio from MP4: {e}")
+                        except Exception as e:
+                            logger.error(f"Error during MP4 extraction: {e}")
+                            raise e
                 else:
                     audio_path = tmp_file_path
                     st.session_state.converted_mp3_path = None
@@ -450,7 +472,7 @@ def main():
                 audio = AudioSegment.from_file(audio_path)
                 duration_ms = len(audio)
                 duration_seconds = duration_ms / 1000
-                if file_extension != 'm4a':
+                if file_extension != 'm4a' and file_extension != 'mp4':
                     os.unlink(audio_path)
                 st.session_state.audio_info = {
                     'duration_ms': duration_ms,
@@ -518,6 +540,9 @@ def main():
                 if file_extension == 'm4a' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
                     if st.session_state.converted_mp3_path is not None:
                         audio_path = st.session_state.converted_mp3_path
+                elif file_extension == 'mp4' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
+                    if st.session_state.converted_mp3_path is not None:
+                        audio_path = st.session_state.converted_mp3_path
                 elif file_extension == 'm4a':
                     if status_text:
                         status_text.text("🔄 Converting M4A to MP3...")
@@ -527,6 +552,27 @@ def main():
                     converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
                     temp_files_to_cleanup.append(converted_path)
                     audio_path = converted_path
+                elif file_extension == 'mp4':
+                    if status_text:
+                        status_text.text("🔄 Extracting audio from MP4...")
+                    time.sleep(0.5)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                        mp3_file_path = mp3_tmp_file.name
+                    # Use ffmpeg to extract audio from MP4
+                    # This requires ffmpeg to be installed and in PATH
+                    if not ffmpeg_available:
+                        raise Exception("MP4 extraction requires FFmpeg. Please ensure it's installed and in your PATH.")
+                    cmd = f"ffmpeg -i {tmp_file_path} -vn -acodec libmp3lame -ab 192k -ar 44100 -y {mp3_file_path}"
+                    try:
+                        subprocess.run(cmd, shell=True, check=True)
+                        audio_path = mp3_file_path
+                        temp_files_to_cleanup.append(audio_path)
+                    except subprocess.CalledProcessError as e:
+                        logger.error(f"Error extracting audio from MP4: {e}")
+                        raise Exception(f"Error extracting audio from MP4: {e}")
+                    except Exception as e:
+                        logger.error(f"Error during MP4 extraction: {e}")
+                        raise e
                 # Apply trimming if settings are provided
                 if trim_settings and (trim_settings['start_time_ms'] > 0 or trim_settings['end_time_ms'] < trim_settings['duration_ms']):
                     if status_text:
@@ -623,7 +669,7 @@ def main():
     )
     st.markdown(
         '<div style="font-size:1rem;line-height:1.6;text-align:center;">'
-        'Supported formats: <b>MP3, WAV, M4A</b>.<br>'
+        'Supported formats: <b>MP3, WAV, M4A, MP4</b>.<br>'
         'Audio trimming and file chunking are automatic.<br>'
         'Created by <b>Juan Giraldo</b>.<br>'
         'Powered by <b>Streamlit</b>, <b>Deepgram</b>, and <b>OpenAI</b>.'
