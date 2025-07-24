@@ -168,25 +168,29 @@ def split_audio_file(file_path: str, max_size_mb: int = 24) -> list[str]:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise e
 
-def transcribe_with_openai(path: str) -> str:
+def transcribe_with_openai(path: str, language: str = None) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY environment variable not set")
     client = OpenAI(api_key=api_key)
     with open(path, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file
-        )
+        kwargs = {
+            "model": "whisper-1",
+            "file": audio_file
+        }
+        if language:
+            kwargs["language"] = language
+        transcript = client.audio.transcriptions.create(**kwargs)
     return transcript.text
 
-def transcribe_with_deepgram(path: str) -> str:
+
+def transcribe_with_deepgram(path: str, language: str = None) -> str:
     api_key = os.environ.get("DEEPGRAM_API_KEY")
     if not api_key:
         raise EnvironmentError("DEEPGRAM_API_KEY environment variable not set")
-    
-    # Try with language detection and better parameters
-    url_default = "https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&language=es&model=base"
+    # Determinar el código de idioma para Deepgram
+    lang_code = "es" if language == "es" else "en"
+    url_default = f"https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&language={lang_code}&model=base"
     headers = {
         "Authorization": f"Token {api_key}",
         "Content-Type": "audio/mp3",
@@ -196,15 +200,14 @@ def transcribe_with_deepgram(path: str) -> str:
         audio_data = f.read()
     response = requests.post(url_default, headers=headers, data=audio_data)
     if not response.ok:
-        print("Deepgram error response (Spanish model):", response.text)
-        return f"Deepgram error (Spanish model): {response.text}"
+        print(f"Deepgram error response ({lang_code} model):", response.text)
+        return f"Deepgram error ({lang_code} model): {response.text}"
     dg = response.json()
-    print("Deepgram raw response (Spanish model):", dg)
+    print(f"Deepgram raw response ({lang_code} model):", dg)
     transcript = dg.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-    if transcript and len(transcript.strip()) > 10:  # Only return if we have substantial text
+    if transcript and len(transcript.strip()) > 10:
         return transcript
-    
-    # If Spanish model didn't work well, try with language detection
+    # Si no hay buen resultado, intentar autodetección
     url_auto = "https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&detect_language=true"
     response2 = requests.post(url_auto, headers=headers, data=audio_data)
     if not response2.ok:
@@ -215,8 +218,7 @@ def transcribe_with_deepgram(path: str) -> str:
     transcript2 = dg2.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
     if transcript2 and len(transcript2.strip()) > 10:
         return transcript2
-    
-    # If still no good result, try the original default model
+    # Si todo falla, intentar modelo original
     url_original = "https://api.deepgram.com/v1/listen?smart_format=true"
     response3 = requests.post(url_original, headers=headers, data=audio_data)
     if not response3.ok:
@@ -227,26 +229,26 @@ def transcribe_with_deepgram(path: str) -> str:
     transcript3 = dg3.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
     if transcript3:
         return transcript3
-    
-    # If all attempts failed, return debug info
-    return f"Deepgram failed to transcribe properly. Responses:\nSpanish: {dg}\nAuto-detect: {dg2}\nOriginal: {dg3}"
+    return f"Deepgram failed to transcribe properly. Responses:\n{lang_code}: {dg}\nAuto-detect: {dg2}\nOriginal: {dg3}"
 
-def transcribe_file(path: str, model: str) -> str:
+
+def transcribe_file(path: str, model: str, language: str = None) -> str:
     if model == "OpenAI Whisper":
-        return transcribe_with_openai(path)
+        return transcribe_with_openai(path, language)
     elif model == "Deepgram":
-        return transcribe_with_deepgram(path)
+        return transcribe_with_deepgram(path, language)
     else:
         raise ValueError(f"Unknown model: {model}")
 
-def transcribe_large_file(file_path: str, model: str, progress_bar=None, status_text=None) -> str:
+
+def transcribe_large_file(file_path: str, model: str, language: str = None, progress_bar=None, status_text=None) -> str:
     if status_text:
         status_text.text("🔍 Analyzing file...")
     chunk_paths = split_audio_file(file_path)
     if len(chunk_paths) == 1:
         if status_text:
             status_text.text("🎤 Transcribing file...")
-        return transcribe_file(file_path, model)
+        return transcribe_file(file_path, model, language)
     if status_text:
         status_text.text(f"📦 File split into {len(chunk_paths)} chunks")
     transcriptions = []
@@ -258,7 +260,7 @@ def transcribe_large_file(file_path: str, model: str, progress_bar=None, status_
             if progress_bar:
                 progress_bar.progress(i / len(chunk_paths))
             try:
-                chunk_transcription = transcribe_file(chunk_path, model)
+                chunk_transcription = transcribe_file(chunk_path, model, language)
                 transcriptions.append(chunk_transcription)
                 if status_text:
                     status_text.text(f"✅ Chunk {i} processed")
@@ -520,6 +522,10 @@ def main():
     if uploaded_file is not None:
         if st.button("🎤 Start Transcription", type="primary"):
             model = st.session_state.get('model', 'Deepgram')
+            # Obtener idioma seleccionado
+            language_ui = st.session_state.get('language', '🇪🇸 Español')
+            # Mapear a código de idioma
+            language_code = 'es' if 'es' in language_ui.lower() else 'en'
             if model == "OpenAI Whisper" and not os.environ.get("OPENAI_API_KEY"):
                 st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
                 return
@@ -589,6 +595,7 @@ def main():
                     transcription = transcribe_large_file(
                         audio_path, 
                         st.session_state.get('model', 'Deepgram'),
+                        language=language_code,
                         progress_bar=progress_bar, 
                         status_text=status_text,
                     )
@@ -627,13 +634,9 @@ def main():
     # Show the bordered frame for transcription and controls only if there is a transcription
     if 'transcription' in st.session_state:
         
-        transcription_text = st.text_area(
-            "",
-            value=st.session_state.transcription,
-            height=120,
-            help="The transcribed text from your audio file",
-            label_visibility="visible"
-        )
+        # Show transcription in a code block with copy button
+        st.code(st.session_state.transcription, language=None)
+        
         st.markdown('<div style="height:0.5rem;"></div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         with col1:
@@ -646,9 +649,8 @@ def main():
                 help="Download the transcription as a text file"
             )
         with col2:
-            if st.button("Copy to clipboard"):
-                st.write("📋 Copied to clipboard!")
-                st.code(st.session_state.transcription)
+            # Remove the copy button since st.code() has built-in copy functionality
+            st.markdown('<div style="height:2.5rem;"></div>', unsafe_allow_html=True)  # Spacer to align with download button
         st.markdown('</div>', unsafe_allow_html=True)
     # If no transcription, do not show the frame, placeholder, or empty text area
 
@@ -659,6 +661,14 @@ def main():
         ["Deepgram", "OpenAI Whisper"],
         key='model',
         help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
+    )
+
+    # Language Selector (Español/Inglés)
+    language = st.selectbox(
+        "Language",
+        ["🇪🇸 Español", "🇬🇧 English"],
+        key='language',
+        help="Select the language of the audio for better transcription accuracy."
     )
 
     # Other Info (polished, centered, no bubble)
