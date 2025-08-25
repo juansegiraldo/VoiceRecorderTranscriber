@@ -680,7 +680,7 @@ def main():
     st.markdown(
         '<div style="font-size:1rem;line-height:1.6;text-align:center;">'
         'Supported formats: <b>MP3, WAV, M4A, MP4</b>.<br>'
-        'Audio trimming and file chunking are automatic.<br>'
+        '<a href="https://chatgpt.com/g/g-6874e87c48608191afa2da8e3e769279-generadoractasreunion" target="_blank">Usa este GPT para generar el acta</a><br>'
         'Created by <b>Juan Giraldo</b>.<br>'
         'Powered by <b>Streamlit</b>, <b>Deepgram</b>, and <b>OpenAI</b>.'
         '</div>',
