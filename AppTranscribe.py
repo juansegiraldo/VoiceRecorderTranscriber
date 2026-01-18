@@ -184,13 +184,70 @@ def transcribe_with_openai(path: str, language: str = None) -> str:
     return transcript.text
 
 
-def transcribe_with_deepgram(path: str, language: str = None) -> str:
+def format_diarized_output(deepgram_response: dict) -> str:
+    """
+    Format Deepgram response with utterances into a speaker-labeled transcript.
+    Groups consecutive utterances from the same speaker together for better readability.
+    
+    Args:
+        deepgram_response: Deepgram API JSON response with utterances
+        
+    Returns:
+        Formatted string with speaker labels like "[Speaker 0]: text"
+    """
+    utterances = deepgram_response.get("results", {}).get("utterances", [])
+    if not utterances:
+        # Fallback to regular transcript if no utterances
+        transcript = deepgram_response.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+        return transcript if transcript else ""
+    
+    formatted_lines = []
+    current_speaker = None
+    current_text_parts = []
+    
+    for utterance in utterances:
+        speaker = utterance.get("speaker", 0)
+        transcript = utterance.get("transcript", "").strip()
+        
+        if not transcript:
+            continue
+        
+        # If same speaker, combine with previous text
+        if speaker == current_speaker:
+            current_text_parts.append(transcript)
+        else:
+            # New speaker - save previous speaker's combined text
+            if current_speaker is not None and current_text_parts:
+                combined_text = " ".join(current_text_parts)
+                formatted_lines.append(f"[Speaker {current_speaker}]: {combined_text}")
+            
+            # Start new speaker
+            current_speaker = speaker
+            current_text_parts = [transcript]
+    
+    # Don't forget the last speaker
+    if current_speaker is not None and current_text_parts:
+        combined_text = " ".join(current_text_parts)
+        formatted_lines.append(f"[Speaker {current_speaker}]: {combined_text}")
+    
+    return "\n".join(formatted_lines)
+
+
+def transcribe_with_deepgram(path: str, language: str = None, diarize: bool = False) -> str:
     api_key = os.environ.get("DEEPGRAM_API_KEY")
     if not api_key:
         raise EnvironmentError("DEEPGRAM_API_KEY environment variable not set")
     # Determinar el código de idioma para Deepgram
     lang_code = "es" if language == "es" else "en"
-    url_default = f"https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&language={lang_code}&model=base"
+    
+    # Build URL parameters
+    base_params = "smart_format=true&punctuate=true"
+    if diarize:
+        base_params += "&diarize=true&utterances=true"
+    else:
+        base_params += "&diarize=false"
+    
+    url_default = f"https://api.deepgram.com/v1/listen?{base_params}&language={lang_code}&model=base"
     headers = {
         "Authorization": f"Token {api_key}",
         "Content-Type": "audio/mp3",
@@ -204,51 +261,75 @@ def transcribe_with_deepgram(path: str, language: str = None) -> str:
         return f"Deepgram error ({lang_code} model): {response.text}"
     dg = response.json()
     print(f"Deepgram raw response ({lang_code} model):", dg)
-    transcript = dg.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-    if transcript and len(transcript.strip()) > 10:
-        return transcript
+    
+    # Handle diarized response
+    if diarize:
+        formatted = format_diarized_output(dg)
+        if formatted and len(formatted.strip()) > 10:
+            return formatted
+    else:
+        transcript = dg.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+        if transcript and len(transcript.strip()) > 10:
+            return transcript
+    
     # Si no hay buen resultado, intentar autodetección
-    url_auto = "https://api.deepgram.com/v1/listen?smart_format=true&punctuate=true&diarize=false&detect_language=true"
+    url_auto = f"https://api.deepgram.com/v1/listen?{base_params}&detect_language=true"
     response2 = requests.post(url_auto, headers=headers, data=audio_data)
     if not response2.ok:
         print("Deepgram error response (auto-detect):", response2.text)
         return f"Deepgram error (auto-detect): {response2.text}"
     dg2 = response2.json()
     print("Deepgram raw response (auto-detect):", dg2)
-    transcript2 = dg2.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-    if transcript2 and len(transcript2.strip()) > 10:
-        return transcript2
+    
+    # Handle diarized response
+    if diarize:
+        formatted2 = format_diarized_output(dg2)
+        if formatted2 and len(formatted2.strip()) > 10:
+            return formatted2
+    else:
+        transcript2 = dg2.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+        if transcript2 and len(transcript2.strip()) > 10:
+            return transcript2
+    
     # Si todo falla, intentar modelo original
-    url_original = "https://api.deepgram.com/v1/listen?smart_format=true"
+    url_original = f"https://api.deepgram.com/v1/listen?{base_params}"
     response3 = requests.post(url_original, headers=headers, data=audio_data)
     if not response3.ok:
         print("Deepgram error response (original):", response3.text)
         return f"Deepgram error (original): {response3.text}"
     dg3 = response3.json()
     print("Deepgram raw response (original):", dg3)
-    transcript3 = dg3.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-    if transcript3:
-        return transcript3
+    
+    # Handle diarized response
+    if diarize:
+        formatted3 = format_diarized_output(dg3)
+        if formatted3:
+            return formatted3
+    else:
+        transcript3 = dg3.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+        if transcript3:
+            return transcript3
+    
     return f"Deepgram failed to transcribe properly. Responses:\n{lang_code}: {dg}\nAuto-detect: {dg2}\nOriginal: {dg3}"
 
 
-def transcribe_file(path: str, model: str, language: str = None) -> str:
+def transcribe_file(path: str, model: str, language: str = None, diarize: bool = False) -> str:
     if model == "OpenAI Whisper":
         return transcribe_with_openai(path, language)
     elif model == "Deepgram":
-        return transcribe_with_deepgram(path, language)
+        return transcribe_with_deepgram(path, language, diarize)
     else:
         raise ValueError(f"Unknown model: {model}")
 
 
-def transcribe_large_file(file_path: str, model: str, language: str = None, progress_bar=None, status_text=None) -> str:
+def transcribe_large_file(file_path: str, model: str, language: str = None, diarize: bool = False, progress_bar=None, status_text=None) -> str:
     if status_text:
         status_text.text("🔍 Analyzing file...")
     chunk_paths = split_audio_file(file_path)
     if len(chunk_paths) == 1:
         if status_text:
             status_text.text("🎤 Transcribing file...")
-        return transcribe_file(file_path, model, language)
+        return transcribe_file(file_path, model, language, diarize)
     if status_text:
         status_text.text(f"📦 File split into {len(chunk_paths)} chunks")
     transcriptions = []
@@ -260,7 +341,7 @@ def transcribe_large_file(file_path: str, model: str, language: str = None, prog
             if progress_bar:
                 progress_bar.progress(i / len(chunk_paths))
             try:
-                chunk_transcription = transcribe_file(chunk_path, model, language)
+                chunk_transcription = transcribe_file(chunk_path, model, language, diarize)
                 transcriptions.append(chunk_transcription)
                 if status_text:
                     status_text.text(f"✅ Chunk {i} processed")
@@ -271,7 +352,11 @@ def transcribe_large_file(file_path: str, model: str, language: str = None, prog
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-    combined_transcription = " ".join(transcriptions)
+    # Join transcriptions - use newlines for diarized output to preserve speaker labels
+    if diarize:
+        combined_transcription = "\n\n".join(transcriptions)
+    else:
+        combined_transcription = " ".join(transcriptions)
     return combined_transcription
 
 def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate: str = "192k") -> str:
@@ -541,45 +626,53 @@ def main():
                     tmp_file_path = tmp_file.name
                 file_extension = uploaded_file.name.split('.')[-1].lower()
                 temp_files_to_cleanup = [tmp_file_path]
-                # Use cached MP3 if available
+                # Use cached MP3 if available (to avoid re-conversion)
                 audio_path: str = tmp_file_path  # Default
+                use_cached_mp3 = False
                 if file_extension == 'm4a' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
                     if st.session_state.converted_mp3_path is not None:
                         audio_path = st.session_state.converted_mp3_path
+                        use_cached_mp3 = True
                 elif file_extension == 'mp4' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
                     if st.session_state.converted_mp3_path is not None:
                         audio_path = st.session_state.converted_mp3_path
-                elif file_extension == 'm4a':
-                    if status_text:
-                        status_text.text("🔄 Converting M4A to MP3...")
-                    time.sleep(0.5)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
-                        mp3_file_path = mp3_tmp_file.name
-                    converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
-                    temp_files_to_cleanup.append(converted_path)
-                    audio_path = converted_path
-                elif file_extension == 'mp4':
-                    if status_text:
-                        status_text.text("🔄 Extracting audio from MP4...")
-                    time.sleep(0.5)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
-                        mp3_file_path = mp3_tmp_file.name
-                    # Use ffmpeg to extract audio from MP4
-                    # This requires ffmpeg to be installed and in PATH
-                    if not ffmpeg_available:
-                        raise Exception("MP4 extraction requires FFmpeg. Please ensure it's installed and in your PATH.")
-                    cmd = f"ffmpeg -i {tmp_file_path} -vn -acodec libmp3lame -ab 192k -ar 44100 -y {mp3_file_path}"
-                    try:
-                        subprocess.run(cmd, shell=True, check=True)
-                        audio_path = mp3_file_path
-                        temp_files_to_cleanup.append(audio_path)
-                    except subprocess.CalledProcessError as e:
-                        logger.error(f"Error extracting audio from MP4: {e}")
-                        raise Exception(f"Error extracting audio from MP4: {e}")
-                    except Exception as e:
-                        logger.error(f"Error during MP4 extraction: {e}")
-                        raise e
+                        use_cached_mp3 = True
+                
+                # Only convert if we don't have a cached MP3
+                if not use_cached_mp3:
+                    if file_extension == 'm4a':
+                        if status_text:
+                            status_text.text("🔄 Converting M4A to MP3...")
+                        time.sleep(0.5)
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                            mp3_file_path = mp3_tmp_file.name
+                        converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
+                        temp_files_to_cleanup.append(converted_path)
+                        audio_path = converted_path
+                    elif file_extension == 'mp4':
+                        if status_text:
+                            status_text.text("🔄 Extracting audio from MP4...")
+                        time.sleep(0.5)
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                            mp3_file_path = mp3_tmp_file.name
+                        # Use ffmpeg to extract audio from MP4
+                        # This requires ffmpeg to be installed and in PATH
+                        if not ffmpeg_available:
+                            raise Exception("MP4 extraction requires FFmpeg. Please ensure it's installed and in your PATH.")
+                        cmd = f"ffmpeg -i {tmp_file_path} -vn -acodec libmp3lame -ab 192k -ar 44100 -y {mp3_file_path}"
+                        try:
+                            subprocess.run(cmd, shell=True, check=True)
+                            audio_path = mp3_file_path
+                            temp_files_to_cleanup.append(audio_path)
+                        except subprocess.CalledProcessError as e:
+                            logger.error(f"Error extracting audio from MP4: {e}")
+                            raise Exception(f"Error extracting audio from MP4: {e}")
+                        except Exception as e:
+                            logger.error(f"Error during MP4 extraction: {e}")
+                            raise e
+                
                 # Apply trimming if settings are provided
+                # Note: audio_path is already MP3 at this point (either from cache or conversion)
                 if trim_settings and (trim_settings['start_time_ms'] > 0 or trim_settings['end_time_ms'] < trim_settings['duration_ms']):
                     if status_text:
                         status_text.text("✂️ Trimming audio...")
@@ -592,10 +685,14 @@ def main():
                         temp_files_to_cleanup.append(trimmed_path)
                         audio_path = trimmed_path
                 if audio_path is not None:
+                    # Get diarize setting (only use if Deepgram is selected)
+                    model = st.session_state.get('model', 'Deepgram')
+                    diarize_setting = st.session_state.get('diarize', False) if model == "Deepgram" else False
                     transcription = transcribe_large_file(
                         audio_path, 
-                        st.session_state.get('model', 'Deepgram'),
+                        model,
                         language=language_code,
+                        diarize=diarize_setting,
                         progress_bar=progress_bar, 
                         status_text=status_text,
                     )
@@ -669,6 +766,15 @@ def main():
         ["🇪🇸 Español", "🇬🇧 English"],
         key='language',
         help="Select the language of the audio for better transcription accuracy."
+    )
+
+    # Speaker Diarization Toggle (only for Deepgram)
+    diarize_enabled = st.checkbox(
+        "Identify different speakers (diarization)",
+        key='diarize',
+        value=True,  # Default to enabled
+        disabled=(model == "OpenAI Whisper"),
+        help="Enable speaker identification to show who said what. Only works with Deepgram model."
     )
 
     # Other Info (polished, centered, no bubble)
