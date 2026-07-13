@@ -5,6 +5,7 @@ import requests
 from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
+import json
 import shutil
 import math
 import time
@@ -29,6 +30,21 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def get_secret(key, default=None):
+    """Read a secret preferring Streamlit Cloud's st.secrets, falling back to
+    environment variables (loaded from .env locally via python-dotenv).
+
+    st.secrets raises if no secrets.toml exists (e.g. local dev), so we guard it.
+    """
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
 
 # Check for FFmpeg availability
 def check_ffmpeg():
@@ -100,8 +116,8 @@ def trim_audio_file(input_path: str, start_time_ms: int, end_time_ms: int, outpu
 st.set_page_config(
     page_title="Voice Transcriber",
     page_icon="🎤",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
 # Custom CSS for better styling
@@ -169,7 +185,7 @@ def split_audio_file(file_path: str, max_size_mb: int = 24) -> list[str]:
         raise e
 
 def transcribe_with_openai(path: str, language: str = None) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = get_secret("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY environment variable not set")
     client = OpenAI(api_key=api_key)
@@ -320,7 +336,7 @@ def transcribe_with_deepgram(path: str, language: str = None, diarize: bool = Fa
     Returns:
         Formatted transcript string or raw response dict if return_raw=True
     """
-    api_key = os.environ.get("DEEPGRAM_API_KEY")
+    api_key = get_secret("DEEPGRAM_API_KEY")
     if not api_key:
         raise EnvironmentError("DEEPGRAM_API_KEY environment variable not set")
     # Determinar el código de idioma para Deepgram
@@ -623,9 +639,338 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
             raise Exception("M4A conversion is not available on this server. Please convert your M4A files to MP3 or WAV format before uploading.")
         raise e
 
+
+# ---------------------------------------------------------------------------
+# Google Drive source
+#
+# A DriveFile mimics the subset of Streamlit's UploadedFile interface that the
+# transcription pipeline relies on (.name / .size / .type / .getvalue()), so a
+# file fetched from Drive is indistinguishable from a local upload to all code
+# downstream of the uploader. This means the conversion cache (keyed on
+# name+size+type), M4A/MP4 conversion, duration analysis, trimming and
+# transcription all work unchanged.
+# ---------------------------------------------------------------------------
+
+# Scope: read-only access is enough to list and download the user's audio.
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+# Extensions the app can transcribe; used as a safety net when a Drive file's
+# mimeType is generic (e.g. application/octet-stream).
+DRIVE_AUDIO_EXTENSIONS = ('.mp3', '.wav', '.m4a', '.mp4')
+
+
+class DriveFile:
+    """Duck-typed stand-in for st.runtime.uploaded_file_manager.UploadedFile."""
+
+    def __init__(self, name, data_bytes, mime_type, file_id):
+        self.name = name  # MUST keep a real extension: downstream routes by name.split('.')[-1]
+        self._data = data_bytes
+        self.size = len(data_bytes)
+        # fileId is folded into .type only to keep file_key unique across two
+        # Drive files that share name+size. .type is never parsed downstream.
+        self.type = f"{mime_type}|{file_id}"
+
+    def getvalue(self):
+        return self._data
+
+
+def _drive_configured():
+    """True only if the three Google OAuth secrets are present."""
+    return all(get_secret(k) for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"))
+
+
+# --- PKCE hand-off across the OAuth redirect ------------------------------
+# When Google redirects back to the app, the browser opens a BRAND-NEW
+# Streamlit session, so st.session_state from the login click is gone. The
+# `state` value does survive — it round-trips through the URL. So we stash the
+# PKCE code_verifier on disk keyed by `state`, and the callback (which reads
+# `state` from the URL) looks it up there. This is the standard workaround for
+# OAuth-with-PKCE on Streamlit's per-session-memory model.
+def _pkce_store_path():
+    return os.path.join(tempfile.gettempdir(), "vt_oauth_pkce.json")
+
+
+def _pkce_save(state, verifier):
+    path = _pkce_store_path()
+    try:
+        store = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                store = json.load(f)
+    except Exception:
+        store = {}
+    store[state] = verifier
+    # Bound the file: keep only the last few pending logins.
+    if len(store) > 10:
+        store = dict(list(store.items())[-10:])
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(store, f)
+    except Exception as e:
+        logger.warning(f"Could not persist PKCE verifier: {e}")
+
+
+def _pkce_pop(state):
+    path = _pkce_store_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            store = json.load(f)
+    except Exception:
+        return None
+    verifier = store.pop(state, None)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(store, f)
+    except Exception:
+        pass
+    return verifier
+
+
+def _build_drive_flow():
+    """Create an OAuth Flow from secrets. Imported lazily so the app still runs
+    if the google libraries aren't installed and Drive simply isn't used."""
+    from google_auth_oauthlib.flow import Flow
+
+    client_config = {
+        "web": {
+            "client_id": get_secret("GOOGLE_CLIENT_ID"),
+            "client_secret": get_secret("GOOGLE_CLIENT_SECRET"),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [get_secret("GOOGLE_REDIRECT_URI")],
+        }
+    }
+    flow = Flow.from_client_config(client_config, scopes=DRIVE_SCOPES)
+    flow.redirect_uri = get_secret("GOOGLE_REDIRECT_URI")
+    return flow
+
+
+def _credentials_to_dict(creds):
+    return {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": creds.scopes,
+    }
+
+
+def _get_drive_credentials():
+    """Rebuild Credentials from the dict stashed in session_state, refreshing if
+    expired. Returns None if the user isn't authenticated (or refresh fails)."""
+    creds_dict = st.session_state.get("drive_creds")
+    if not creds_dict:
+        return None
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+
+    creds = Credentials(**creds_dict)
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            st.session_state.drive_creds = _credentials_to_dict(creds)
+        except Exception as e:
+            logger.warning(f"Drive token refresh failed: {e}")
+            # Force re-login by dropping the stale credentials.
+            st.session_state.pop("drive_creds", None)
+            return None
+    return creds
+
+
+def _handle_drive_oauth_callback():
+    """If Google redirected back with ?code=..., exchange it for tokens once,
+    then clear the query params (a spent code fails on rerun) and rerun."""
+    params = st.query_params
+    code = params.get("code")
+    if not code or st.session_state.get("drive_creds"):
+        return
+    # The `state` from the URL is our key into the on-disk PKCE store. If it's
+    # not there, this is a stale/foreign callback (also our CSRF guard: an
+    # attacker cannot produce a `state` that indexes a verifier we saved).
+    returned_state = params.get("state")
+    verifier = _pkce_pop(returned_state) if returned_state else None
+    if not verifier:
+        st.error("❌ Google login expiró o no se pudo validar. Pulsa el botón de nuevo.")
+        st.query_params.clear()
+        return
+    try:
+        flow = _build_drive_flow()
+        # Replay the PKCE code_verifier saved when we built the login URL;
+        # without it Google rejects the exchange with "Missing code verifier".
+        flow.code_verifier = verifier
+        flow.fetch_token(code=code)
+        st.session_state.drive_creds = _credentials_to_dict(flow.credentials)
+    except Exception as e:
+        logger.error(f"Drive token exchange failed: {e}")
+        st.error(f"❌ Google login failed: {e}")
+    finally:
+        # Always clear the code so a rerun never re-uses it.
+        st.query_params.clear()
+    st.rerun()
+
+
+def _get_drive_login_url():
+    """Build the consent URL and remember the CSRF state + PKCE verifier."""
+    flow = _build_drive_flow()
+    auth_url, state = flow.authorization_url(
+        access_type="offline",          # needed to receive a refresh_token
+        include_granted_scopes="true",
+        prompt="consent",               # force refresh_token on repeat logins
+    )
+    # PKCE: the code_verifier generated here must be replayed at token exchange,
+    # which happens in a fresh Streamlit SESSION after the Google redirect — so
+    # session_state won't carry it. Persist it on disk keyed by `state` (which
+    # does survive, via the URL). The callback looks it up by the returned state.
+    verifier = getattr(flow, "code_verifier", None)
+    _pkce_save(state, verifier)
+    return auth_url
+
+
+def list_drive_audio(creds, page_size=25):
+    """List the user's most recent audio/video files. Returns a list of dicts
+    with id/name/size/mimeType."""
+    from googleapiclient.discovery import build
+
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    query = ("(mimeType contains 'audio/' or mimeType = 'video/mp4') "
+             "and trashed = false")
+    resp = service.files().list(
+        q=query,
+        orderBy="modifiedTime desc",
+        pageSize=page_size,
+        fields="files(id,name,size,mimeType,modifiedTime)",
+        spaces="drive",
+    ).execute()
+    files = resp.get("files", [])
+    # Safety net: also keep anything whose name has a supported extension, in
+    # case the mimeType filter missed it (some m4a report odd mimetypes).
+    seen = {f["id"] for f in files}
+    if len(files) < page_size:
+        resp2 = service.files().list(
+            q="trashed = false",
+            orderBy="modifiedTime desc",
+            pageSize=page_size,
+            fields="files(id,name,size,mimeType,modifiedTime)",
+            spaces="drive",
+        ).execute()
+        for f in resp2.get("files", []):
+            if f["id"] not in seen and f["name"].lower().endswith(DRIVE_AUDIO_EXTENSIONS):
+                files.append(f)
+    return files
+
+
+def download_drive_file(creds, file_id, name, mime_type):
+    """Download a Drive file into memory and wrap it as a DriveFile. Cached in
+    session_state by file_id so slider reruns don't re-download."""
+    cache = st.session_state.setdefault("drive_download_cache", {})
+    if file_id in cache:
+        return cache[file_id]
+
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    request = service.files().get_media(fileId=file_id)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    drive_file = DriveFile(name, buffer.getvalue(), mime_type or "application/octet-stream", file_id)
+    # Keep only the most recent download to bound memory.
+    cache.clear()
+    cache[file_id] = drive_file
+    return drive_file
+
+
+def render_drive_tab():
+    """Render the Google Drive source tab. Returns a DriveFile if the user has
+    loaded one, else None."""
+    if not _drive_configured():
+        st.info(
+            "☁️ Google Drive no está configurado en este despliegue. "
+            "Añade `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `GOOGLE_REDIRECT_URI` "
+            "en los *secrets* para habilitarlo."
+        )
+        return None
+
+    creds = _get_drive_credentials()
+    if creds is None:
+        st.markdown(
+            '<div style="text-align:center;color:#666;margin-bottom:0.8rem;">'
+            'Inicia sesión con Google para elegir un audio de tu Drive.</div>',
+            unsafe_allow_html=True,
+        )
+        try:
+            login_url = _get_drive_login_url()
+            st.link_button("🔑 Iniciar sesión con Google", login_url, use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ No se pudo iniciar el login de Google: {e}")
+        return None
+
+    # Authenticated: list audio and let the user pick + load one.
+    try:
+        files = list_drive_audio(creds)
+    except Exception as e:
+        logger.error(f"Drive list failed: {e}")
+        st.error(f"❌ No se pudieron listar los archivos de Drive: {e}")
+        if st.button("Cerrar sesión de Google", key="drive_logout_err"):
+            st.session_state.pop("drive_creds", None)
+            st.rerun()
+        return None
+
+    if not files:
+        st.info("No se encontraron archivos de audio recientes en tu Drive.")
+        if st.button("Cerrar sesión de Google", key="drive_logout_empty"):
+            st.session_state.pop("drive_creds", None)
+            st.rerun()
+        return None
+
+    def _label(f):
+        size_mb = f"{int(f['size']) / 1024 / 1024:.1f} MB" if f.get("size") else "?"
+        modified = f.get("modifiedTime", "")[:10]
+        return f"{f['name']} — {modified} — {size_mb}"
+
+    options = {_label(f): f for f in files}
+    choice = st.selectbox("Audios recientes en tu Drive", list(options.keys()), key="drive_file_choice")
+    selected = options[choice]
+
+    load_col, logout_col = st.columns([3, 1])
+    loaded = None
+    with load_col:
+        if st.button("☁️ Cargar de Drive", type="primary", key="drive_load_btn", use_container_width=True):
+            with st.spinner("Descargando de Google Drive..."):
+                try:
+                    loaded = download_drive_file(
+                        creds, selected["id"], selected["name"], selected.get("mimeType")
+                    )
+                    st.session_state.drive_loaded_id = selected["id"]
+                except Exception as e:
+                    logger.error(f"Drive download failed: {e}")
+                    st.error(f"❌ No se pudo descargar el archivo: {e}")
+    with logout_col:
+        if st.button("Salir", key="drive_logout", use_container_width=True):
+            st.session_state.pop("drive_creds", None)
+            st.session_state.pop("drive_download_cache", None)
+            st.session_state.pop("drive_loaded_id", None)
+            st.rerun()
+
+    # On plain reruns (e.g. moving the trim slider), re-surface the already
+    # downloaded file from cache instead of forcing another click.
+    if loaded is None:
+        cached_id = st.session_state.get("drive_loaded_id")
+        cache = st.session_state.get("drive_download_cache", {})
+        if cached_id and cached_id in cache:
+            loaded = cache[cached_id]
+    return loaded
+
+
 def main():
     st.markdown(
         '''<style>
+        html {
+            -webkit-text-size-adjust: 100%; /* stop iOS from resizing text unexpectedly */
+        }
         body, .main, .block-container {
             background: #fafbfc !important;
         }
@@ -640,82 +985,69 @@ def main():
                 padding: 0.5rem !important;
             }
         }
-        .mobile-card {
-            background: #fff;
-            border-radius: 1.5rem;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.07);
-            padding: 2rem 1.2rem 1.5rem 1.2rem;
-            margin-bottom: 1.5rem;
-        }
-        .mobile-header {
-            font-size: 2.2rem;
-            font-weight: 800;
-            text-align: left;
-            margin-bottom: 0.2rem;
-            letter-spacing: -1px;
-        }
-        .mobile-sub {
-            color: #888;
-            font-size: 1.1rem;
-            margin-bottom: 1.2rem;
-        }
-        .mobile-search {
-            display: flex;
-            align-items: center;
-            background: #f3f4f6;
-            border-radius: 1.2rem;
-            padding: 0.7rem 1.2rem;
-            margin-bottom: 1.5rem;
-            border: 1px solid #e5e7eb;
-        }
-        .mobile-search input {
-            border: none;
-            background: transparent;
-            outline: none;
-            font-size: 1.1rem;
-            width: 100%;
-        }
-        .mobile-section-title {
-            font-size: 1.1rem;
-            font-weight: 700;
-            margin-bottom: 0.7rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        .mobile-instructions li {
-            margin-bottom: 0.5rem;
-        }
         @media (max-width: 600px) {
             .block-container {
                 max-width: 100% !important;
                 padding: 0.5rem !important;
             }
-            .mobile-card {
-                padding: 1.2rem 0.5rem 1rem 0.5rem;
-            }
-            .mobile-header {
-                font-size: 1.4rem;
-            }
+        }
+        /* --- Mobile-friendly tap targets --- */
+        /* Full-width primary buttons and download button for easy thumb taps */
+        .stButton > button,
+        .stDownloadButton > button {
+            width: 100%;
+            min-height: 44px; /* Apple/Google recommended minimum touch target */
+        }
+        /* Comfortable height for select boxes and number inputs on touch */
+        div[data-baseweb="select"] > div,
+        .stNumberInput input,
+        .stTextInput input {
+            min-height: 44px;
+            font-size: 16px !important; /* >=16px prevents iOS auto-zoom on focus */
+        }
+        /* File uploader: full width and a bit more breathing room */
+        .stFileUploader {
+            width: 100%;
         }
         </style>''', unsafe_allow_html=True)
+
+    # Complete any pending Google Drive OAuth redirect before rendering the UI.
+    _handle_drive_oauth_callback()
 
     # Logo and App Name (centered, no bubble)
     st.markdown('<div style="text-align:center;margin-bottom:1.2rem;"><span style="font-size:2.2rem;">🎤</span><div style="font-size:2rem;font-weight:700;margin-top:0.5rem;">Voice Transcriber</div></div>', unsafe_allow_html=True)
 
     # Transcription Section
     st.markdown('<div style="font-size:1.3rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Insert audio file</div>', unsafe_allow_html=True)
-    # st.markdown('<div style="text-align:center;">Choose an audio file</div>', unsafe_allow_html=True)
     allowed_types = ['mp3', 'wav']
     if ffmpeg_available:
         allowed_types.append('m4a')
         allowed_types.append('mp4')
-    uploaded_file = st.file_uploader(
-        "",
-        type=allowed_types,
-        help="Select an audio file to transcribe (MP3, WAV, M4A, MP4)" + (" (M4A/MP4 extraction requires FFmpeg)" if not ffmpeg_available else ""),
-        label_visibility="visible"
-    )
+
+    # Two input sources: a local upload or a file from the user's Google Drive.
+    # Both converge on `uploaded_file` (a real UploadedFile or a DriveFile);
+    # everything downstream is source-agnostic.
+    tab_local, tab_drive = st.tabs(["📁 Subir archivo", "☁️ Google Drive"])
+    with tab_local:
+        local_file = st.file_uploader(
+            "Audio file",
+            type=allowed_types,
+            help="Select an audio file to transcribe (MP3, WAV, M4A, MP4)" + (" (M4A/MP4 extraction requires FFmpeg)" if not ffmpeg_available else ""),
+            label_visibility="collapsed"
+        )
+    with tab_drive:
+        drive_file = render_drive_tab()
+
+    # Prefer whichever source the user last acted in; default to the local upload.
+    if local_file is not None:
+        st.session_state.last_input_source = "local"
+    elif drive_file is not None and st.session_state.get("drive_loaded_id"):
+        st.session_state.last_input_source = "drive"
+
+    if st.session_state.get("last_input_source") == "drive":
+        uploaded_file = drive_file if drive_file is not None else local_file
+    else:
+        uploaded_file = local_file if local_file is not None else drive_file
     
     # Audio trimming section
     trim_settings = None
@@ -814,20 +1146,71 @@ def main():
         
         # Trimming controls
         st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Audio Trimming (Optional)</div>', unsafe_allow_html=True)
-        
-        # Use a single range slider for start and end time
-        trim_range = st.slider(
+
+        max_seconds = float(duration_seconds)
+
+        # The slider and the two number inputs are three views of the same trim
+        # range. To keep them in sync WITHOUT hitting Streamlit's "value ignored
+        # because a key exists" trap, the widget keys themselves are the source of
+        # truth: we seed them once per file, then each on_change callback writes the
+        # reconciled values into the OTHER widgets' keys (callbacks run before the
+        # widgets are re-instantiated, so this propagates cleanly). No `value=` args.
+        if st.session_state.get('trim_state_key') != file_key:
+            st.session_state.trim_range_slider = (0.0, max_seconds)
+            st.session_state.trim_start_input = 0.0
+            st.session_state.trim_end_input = max_seconds
+            st.session_state.trim_state_key = file_key
+
+        def _sync_from_slider():
+            s, e = st.session_state.trim_range_slider
+            st.session_state.trim_start_input = float(s)
+            st.session_state.trim_end_input = float(e)
+
+        def _sync_from_numbers():
+            s = float(st.session_state.trim_start_input)
+            e = float(st.session_state.trim_end_input)
+            if s > e:  # keep start <= end
+                s = e
+                st.session_state.trim_start_input = s
+            st.session_state.trim_range_slider = (s, e)
+
+        # Coarse selection: two-handle range slider
+        st.slider(
             "Select audio range to transcribe",
             min_value=0.0,
-            max_value=float(duration_seconds),
-            value=(0.0, float(duration_seconds)),
+            max_value=max_seconds,
             step=0.1,
             format="%.1f s",
             help="Select the portion of the audio to transcribe (start and end times)",
-            key="trim_range_slider"
+            key="trim_range_slider",
+            on_change=_sync_from_slider,
         )
-        start_time, end_time = trim_range
-        
+
+        # Precise entry (much easier than dragging on a phone): numeric start/end
+        num_col1, num_col2 = st.columns(2)
+        with num_col1:
+            st.number_input(
+                "Start (s)",
+                min_value=0.0,
+                max_value=max_seconds,
+                step=0.1,
+                format="%.1f",
+                key="trim_start_input",
+                on_change=_sync_from_numbers,
+            )
+        with num_col2:
+            st.number_input(
+                "End (s)",
+                min_value=0.0,
+                max_value=max_seconds,
+                step=0.1,
+                format="%.1f",
+                key="trim_end_input",
+                on_change=_sync_from_numbers,
+            )
+
+        start_time, end_time = st.session_state.trim_range_slider
+
         # Show trim preview
         trim_duration = end_time - start_time
         st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">✂️ Will transcribe: {format_time(start_time)} - {format_time(end_time)} ({format_time(trim_duration)} total)</div>', unsafe_allow_html=True)
@@ -847,10 +1230,10 @@ def main():
             language_ui = st.session_state.get('language', '🇪🇸 Español')
             # Mapear a código de idioma
             language_code = 'es' if 'es' in language_ui.lower() else 'en'
-            if model == "OpenAI Whisper" and not os.environ.get("OPENAI_API_KEY"):
+            if model == "OpenAI Whisper" and not get_secret("OPENAI_API_KEY"):
                 st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
                 return
-            elif model == "Deepgram" and not os.environ.get("DEEPGRAM_API_KEY"):
+            elif model == "Deepgram" and not get_secret("DEEPGRAM_API_KEY"):
                 st.error("❌ Deepgram API key not found. Please enter it in a .env file.")
                 return
             progress_bar = st.progress(0)
@@ -967,20 +1350,16 @@ def main():
         st.code(st.session_state.transcription, language=None)
         
         st.markdown('<div style="height:0.5rem;"></div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            download_data = st.session_state.transcription.encode('utf-8')
-            st.download_button(
-                label="Download",
-                data=download_data,
-                file_name=f"{st.session_state.filename.split('.')[0]}_transcript.txt",
-                mime="text/plain",
-                help="Download the transcription as a text file"
-            )
-        with col2:
-            # Remove the copy button since st.code() has built-in copy functionality
-            st.markdown('<div style="height:2.5rem;"></div>', unsafe_allow_html=True)  # Spacer to align with download button
-        st.markdown('</div>', unsafe_allow_html=True)
+        # Full-width download button (better on mobile than a half-width column).
+        # st.code() already provides a built-in copy button, so no second column is needed.
+        download_data = st.session_state.transcription.encode('utf-8')
+        st.download_button(
+            label="Download",
+            data=download_data,
+            file_name=f"{st.session_state.filename.split('.')[0]}_transcript.txt",
+            mime="text/plain",
+            help="Download the transcription as a text file"
+        )
     # If no transcription, do not show the frame, placeholder, or empty text area
 
     # Model Selector (subtitle + select box, no bubble)

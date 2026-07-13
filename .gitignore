@@ -35,6 +35,9 @@ venv.bak/
 .env.test.local
 .env.production.local
 
+# Streamlit secrets (local) — NEVER commit; equivalent of .env for st.secrets
+.streamlit/secrets.toml
+
 # IDE
 .vscode/
 .idea/
