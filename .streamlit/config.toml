@@ -1,0 +1,5 @@
+# Pin an explicit theme. Without one, Streamlit serves a light page and mobile
+# Chrome's "auto-darken websites" feature half-converts it (dark widgets, white
+# headings, light background). An explicitly dark page is never auto-darkened.
+[theme]
+base = "dark"

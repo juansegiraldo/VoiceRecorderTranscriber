@@ -1198,7 +1198,7 @@ def render_drive_tab():
     creds = _get_drive_credentials()
     if creds is None:
         st.markdown(
-            '<div style="text-align:center;color:#666;margin-bottom:0.8rem;">'
+            '<div style="text-align:center;color:#9aa0a6;margin-bottom:0.8rem;">'
             'Inicia sesión con Google para elegir un audio de tu Drive.</div>',
             unsafe_allow_html=True,
         )
@@ -1454,7 +1454,7 @@ def main():
         duration_seconds = audio_info['duration_seconds']
         
         # Show audio info
-        st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">🎵 Duration: {format_time(duration_seconds)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:0.9rem;color:#9aa0a6;text-align:center;margin-bottom:1rem;">🎵 Duration: {format_time(duration_seconds)}</div>', unsafe_allow_html=True)
         
         # Trimming controls
         st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Audio Trimming (Optional)</div>', unsafe_allow_html=True)
@@ -1525,7 +1525,7 @@ def main():
 
         # Show trim preview
         trim_duration = end_time - start_time
-        st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">✂️ Will transcribe: {format_time(start_time)} - {format_time(end_time)} ({format_time(trim_duration)} total)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:0.9rem;color:#9aa0a6;text-align:center;margin-bottom:1rem;">✂️ Will transcribe: {format_time(start_time)} - {format_time(end_time)} ({format_time(trim_duration)} total)</div>', unsafe_allow_html=True)
         
         # Store trim settings
         trim_settings = {
