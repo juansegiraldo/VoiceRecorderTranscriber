@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
 import json
+import base64
 import shutil
 import math
 import time
@@ -184,20 +185,189 @@ def split_audio_file(file_path: str, max_size_mb: int = 24) -> list[str]:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise e
 
-def transcribe_with_openai(path: str, language: str = None) -> str:
+# Non-diarized fallback chain, best model first (mirrors the Deepgram 3-attempt chain)
+OPENAI_TRANSCRIBE_MODELS = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"]
+OPENAI_DIARIZE_MODEL = "gpt-4o-transcribe-diarize"
+
+
+def _get_openai_client() -> OpenAI:
     api_key = get_secret("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY environment variable not set")
-    client = OpenAI(api_key=api_key)
-    with open(path, "rb") as audio_file:
-        kwargs = {
-            "model": "whisper-1",
-            "file": audio_file
+    return OpenAI(api_key=api_key, timeout=300.0, max_retries=2)
+
+
+def transcribe_openai_diarized_raw(client: OpenAI, path: str, language: str = None,
+                                   known_speaker_names: list[str] | None = None,
+                                   known_speaker_clips: list[bytes] | None = None) -> dict:
+    """
+    Single call to OpenAI's diarization model (gpt-4o-transcribe-diarize).
+
+    Returns the parsed diarized_json dict, or {"error": ...} on failure — the
+    same contract as transcribe_with_deepgram(return_raw=True).
+
+    known_speaker_names/known_speaker_clips (max 4; clips must be 2-10s of a
+    single speaker) anchor speaker identity across chunked calls: segments the
+    API matches to a reference come back labeled with that name instead of a
+    generic "A"/"B". Sent via extra_body so older SDK versions without the typed
+    kwargs still work.
+    """
+    with open(path, "rb") as f:
+        audio_bytes = f.read()
+    kwargs = {
+        "model": OPENAI_DIARIZE_MODEL,
+        "response_format": "diarized_json",
+        # Required by the API for audio longer than 30s; harmless below that.
+        "chunking_strategy": "auto",
+    }
+    if language:
+        kwargs["language"] = language
+    extra_body = None
+    if known_speaker_names and known_speaker_clips:
+        extra_body = {
+            "known_speaker_names": known_speaker_names,
+            "known_speaker_references": [
+                "data:audio/mp3;base64," + base64.b64encode(clip).decode("ascii")
+                for clip in known_speaker_clips
+            ],
         }
-        if language:
-            kwargs["language"] = language
-        transcript = client.audio.transcriptions.create(**kwargs)
-    return transcript.text
+    file_arg = (os.path.basename(path), audio_bytes)
+    try:
+        response = client.audio.transcriptions.with_raw_response.create(
+            file=file_arg, extra_body=extra_body, **kwargs
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        # language is best-effort on the diarize model; retry once without it
+        if language and "language" in str(e).lower():
+            try:
+                kwargs.pop("language", None)
+                response = client.audio.transcriptions.with_raw_response.create(
+                    file=file_arg, extra_body=extra_body, **kwargs
+                )
+                return json.loads(response.text)
+            except Exception as e2:
+                print("OpenAI diarize error (no-language retry):", e2)
+                return {"error": str(e2)}
+        print("OpenAI diarize error:", e)
+        return {"error": str(e)}
+
+
+def openai_segments_to_deepgram_shape(openai_response: dict, label_to_speaker: dict | None = None) -> tuple[dict, dict]:
+    """
+    Adapt OpenAI diarized_json (segments with string speaker labels) into the
+    Deepgram-shaped dict the existing diarization helpers consume:
+    {"results": {"utterances": [{"speaker": int, "transcript": str, ...}]}}.
+
+    label_to_speaker may be pre-seeded (e.g. {"S3": 3}) so segments matched to a
+    known-speaker reference land directly on their global integer ID; unseen
+    labels get the next free integer in order of first appearance.
+
+    Returns (shaped_dict, final label->int mapping).
+    """
+    label_to_speaker = dict(label_to_speaker or {})
+    utterances = []
+    for segment in openai_response.get("segments", []):
+        text = (segment.get("text") or "").strip()
+        if not text:
+            continue
+        label = str(segment.get("speaker", "A"))
+        if label not in label_to_speaker:
+            label_to_speaker[label] = max(label_to_speaker.values(), default=-1) + 1
+        utterances.append({
+            "speaker": label_to_speaker[label],
+            "transcript": text,
+            "start": float(segment.get("start") or 0.0),
+            "end": float(segment.get("end") or 0.0),
+        })
+    return {"results": {"utterances": utterances}}, label_to_speaker
+
+
+def extract_speaker_reference_clip(chunk_audio: AudioSegment, utterances: list[dict],
+                                   speaker_id: int, out_dir: str) -> str | None:
+    """
+    Cut a 2-10s single-speaker MP3 clip to use as a known_speaker_reference in
+    later chunks. Utterance timestamps are relative to the chunk the audio came
+    from, so no offset math is needed. Returns the clip path, or None if the
+    speaker has no utterance long enough (or extraction fails) — never raises.
+    """
+    try:
+        MARGIN_MS = 150   # shave edges: segment timestamps can be slightly loose
+        MIN_MS = 2500     # 0.5s safety margin over the API's 2s floor
+        MAX_MS = 8000     # comfortably under the API's 10s cap
+        best = None
+        best_len = 0
+        for utterance in utterances:
+            if utterance.get("speaker") != speaker_id:
+                continue
+            start_ms = int(utterance.get("start", 0) * 1000) + MARGIN_MS
+            end_ms = int(utterance.get("end", 0) * 1000) - MARGIN_MS
+            if end_ms - start_ms > best_len:
+                best_len = end_ms - start_ms
+                best = (start_ms, end_ms)
+        if best is None or best_len < MIN_MS:
+            return None
+        start_ms, end_ms = best
+        if best_len > MAX_MS:
+            # Take the middle of the utterance — least likely to bleed into a neighbor
+            mid = (start_ms + end_ms) // 2
+            start_ms, end_ms = mid - MAX_MS // 2, mid + MAX_MS // 2
+        clip_path = os.path.join(out_dir, f"speaker_ref_{speaker_id}.mp3")
+        chunk_audio[start_ms:end_ms].export(clip_path, format="mp3")
+        return clip_path
+    except Exception as e:
+        print(f"Could not extract reference clip for speaker {speaker_id}:", e)
+        return None
+
+
+def transcribe_with_openai(path: str, language: str = None, diarize: bool = False, return_raw: bool = False) -> str | dict:
+    """
+    Transcribe audio using OpenAI.
+
+    Non-diarized runs walk a fallback chain of models (best first, accept only
+    transcripts >10 chars — mirrors the Deepgram chain). Diarized runs use
+    gpt-4o-transcribe-diarize and fall back to plain transcription if it yields
+    nothing usable.
+
+    Returns a formatted transcript string, or the raw response dict
+    ({"error": ...} on failure) when return_raw=True.
+    """
+    client = _get_openai_client()
+
+    if diarize:
+        raw = transcribe_openai_diarized_raw(client, path, language)
+        if return_raw:
+            return raw
+        if not (isinstance(raw, dict) and "error" in raw):
+            shaped, _ = openai_segments_to_deepgram_shape(raw)
+            formatted = format_diarized_output(shaped)
+            if formatted and len(formatted.strip()) > 10:
+                return formatted
+        # Diarization produced nothing usable — fall through to the plain chain
+
+    last_error = None
+    for model_name in OPENAI_TRANSCRIBE_MODELS:
+        try:
+            with open(path, "rb") as audio_file:
+                kwargs = {
+                    "model": model_name,
+                    "file": audio_file,
+                    "response_format": "text",
+                }
+                if language:
+                    kwargs["language"] = language
+                result = client.audio.transcriptions.create(**kwargs)
+            text = result if isinstance(result, str) else getattr(result, "text", "")
+            text = (text or "").strip()
+            if len(text) > 10:
+                return text
+            if text and model_name == OPENAI_TRANSCRIBE_MODELS[-1]:
+                return text
+            print(f"OpenAI {model_name} returned too little text, trying next model")
+        except Exception as e:
+            last_error = e
+            print(f"OpenAI error ({model_name}):", e)
+    return f"OpenAI failed to transcribe properly. Last error: {last_error}"
 
 
 def format_diarized_output(deepgram_response: dict, speaker_mapping: dict | None = None) -> str:
@@ -428,8 +598,8 @@ def transcribe_with_deepgram(path: str, language: str = None, diarize: bool = Fa
 
 
 def transcribe_file(path: str, model: str, language: str = None, diarize: bool = False) -> str:
-    if model == "OpenAI Whisper":
-        return transcribe_with_openai(path, language)
+    if model == "OpenAI":
+        return transcribe_with_openai(path, language, diarize)
     elif model == "Deepgram":
         return transcribe_with_deepgram(path, language, diarize)
     else:
@@ -545,6 +715,135 @@ def transcribe_large_file_with_diarization(chunk_paths: list[str], language: str
     return combined_transcription
 
 
+def transcribe_large_file_with_diarization_openai(chunk_paths: list[str], language: str = None, progress_bar=None, status_text=None) -> str:
+    """
+    OpenAI counterpart of transcribe_large_file_with_diarization.
+
+    gpt-4o-transcribe-diarize speaker labels are only consistent within one API
+    call, so consistency across chunks is kept two ways (hybrid):
+      1. Native anchoring: up to 4 reference clips of already-identified
+         speakers are sent as known_speaker_references, so the API labels
+         matching segments "S<global_id>" directly.
+      2. Heuristic fallback: labels the API didn't match to a reference are
+         resolved with the existing map_speakers_between_chunks
+         frequency/last-speaker logic.
+    """
+    transcriptions = []
+    temp_dir = os.path.dirname(chunk_paths[0]) if len(chunk_paths) > 1 else None
+    client = _get_openai_client()
+
+    speaker_clips = {}     # global_id -> reference clip path
+    global_counts = {}     # global_id -> cumulative utterance count (picks top-4 refs)
+    prev_stats = {}        # previous chunk's utterance counts keyed by global id
+    prev_last_speaker = None
+    next_global_id = 0
+
+    try:
+        for chunk_idx, chunk_path in enumerate(chunk_paths):
+            chunk_num = chunk_idx + 1
+            if status_text:
+                status_text.text(f"🎤 Processing chunk {chunk_num}/{len(chunk_paths)} (matching speakers)...")
+            if progress_bar:
+                progress_bar.progress(chunk_num / len(chunk_paths))
+
+            try:
+                # Known-speaker refs: the 4 most-talkative identified speakers
+                ref_gids = sorted(speaker_clips.keys(), key=lambda g: global_counts.get(g, 0), reverse=True)[:4]
+                names, clips = [], []
+                for gid in ref_gids:
+                    try:
+                        with open(speaker_clips[gid], "rb") as f:
+                            clips.append(f.read())
+                        names.append(f"S{gid}")
+                    except Exception:
+                        pass
+                ref_gids = [int(name[1:]) for name in names]  # stay aligned if a clip read failed
+
+                raw = transcribe_openai_diarized_raw(client, chunk_path, language, names or None, clips or None)
+
+                if isinstance(raw, dict) and "error" in raw:
+                    # Whole-call failure: degrade to plain transcription for this chunk
+                    transcriptions.append(transcribe_with_openai(chunk_path, language, diarize=False))
+                    continue
+
+                seed = {f"S{gid}": gid for gid in ref_gids}
+                shaped, label_map = openai_segments_to_deepgram_shape(raw, seed)
+                utterances = shaped["results"]["utterances"]
+                if not utterances:
+                    # Silent/empty chunk as far as diarization goes
+                    transcriptions.append(transcribe_with_openai(chunk_path, language, diarize=False))
+                    continue
+
+                # Resolve labels the API didn't match to a reference
+                unmatched_ids = {pid for label, pid in label_map.items() if label not in seed}
+                remap = {}
+                if unmatched_ids:
+                    cur_stats = {}
+                    for utterance in utterances:
+                        if utterance["speaker"] in unmatched_ids:
+                            cur_stats[utterance["speaker"]] = cur_stats.get(utterance["speaker"], 0) + 1
+                    uncovered_prev = {g: c for g, c in prev_stats.items() if g not in ref_gids}
+                    if not uncovered_prev:
+                        # First chunk, or every prior speaker is covered by a ref:
+                        # unmatched labels are genuinely new speakers
+                        for pid in cur_stats:  # insertion order = first appearance
+                            remap[pid] = next_global_id
+                            next_global_id += 1
+                    else:
+                        heuristic = map_speakers_between_chunks(
+                            uncovered_prev,
+                            cur_stats,
+                            prev_last_speaker if prev_last_speaker in uncovered_prev else None,
+                        )
+                        for pid, gid in heuristic.items():
+                            if gid in uncovered_prev:
+                                remap[pid] = gid
+                            else:
+                                # Heuristic's "new speaker" arithmetic can collide
+                                # with a ref-covered gid — use the registry counter
+                                remap[pid] = next_global_id
+                                next_global_id += 1
+                    for utterance in utterances:
+                        utterance["speaker"] = remap.get(utterance["speaker"], utterance["speaker"])
+
+                # Speakers already carry global IDs — no mapping arg needed
+                transcriptions.append(format_diarized_output(shaped))
+
+                # Bookkeeping for the next chunk
+                chunk_stats = {}
+                for utterance in utterances:
+                    chunk_stats[utterance["speaker"]] = chunk_stats.get(utterance["speaker"], 0) + 1
+                for gid, count in chunk_stats.items():
+                    global_counts[gid] = global_counts.get(gid, 0) + count
+                prev_stats = chunk_stats
+                prev_last_speaker = utterances[-1]["speaker"]
+                next_global_id = max(next_global_id, max(chunk_stats) + 1)
+
+                # Harvest reference clips for speakers that don't have one yet
+                if temp_dir:
+                    missing = [gid for gid in chunk_stats if gid not in speaker_clips]
+                    if missing:
+                        chunk_audio = AudioSegment.from_file(chunk_path)
+                        for gid in missing:
+                            clip_path = extract_speaker_reference_clip(chunk_audio, utterances, gid, temp_dir)
+                            if clip_path:
+                                speaker_clips[gid] = clip_path
+
+                if status_text:
+                    status_text.text(f"✅ Chunk {chunk_num} processed")
+
+            except Exception as e:
+                if status_text:
+                    status_text.text(f"❌ Error processing chunk {chunk_num}: {str(e)}")
+                transcriptions.append(f"[Error in chunk {chunk_num}: {str(e)}]")
+
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+    return "\n\n".join(transcriptions)
+
+
 def transcribe_large_file(file_path: str, model: str, language: str = None, diarize: bool = False, progress_bar=None, status_text=None) -> str:
     if status_text:
         status_text.text("🔍 Analyzing file...")
@@ -559,8 +858,10 @@ def transcribe_large_file(file_path: str, model: str, language: str = None, diar
     # Special handling for diarized multi-chunk files
     if diarize and model == "Deepgram":
         return transcribe_large_file_with_diarization(chunk_paths, language, progress_bar, status_text)
-    
-    # Regular processing for non-diarized or non-Deepgram
+    if diarize and model == "OpenAI":
+        return transcribe_large_file_with_diarization_openai(chunk_paths, language, progress_bar, status_text)
+
+    # Regular processing for non-diarized
     transcriptions = []
     temp_dir = os.path.dirname(chunk_paths[0]) if len(chunk_paths) > 1 else None
     try:
@@ -1230,7 +1531,7 @@ def main():
             language_ui = st.session_state.get('language', '🇪🇸 Español')
             # Mapear a código de idioma
             language_code = 'es' if 'es' in language_ui.lower() else 'en'
-            if model == "OpenAI Whisper" and not get_secret("OPENAI_API_KEY"):
+            if model == "OpenAI" and not get_secret("OPENAI_API_KEY"):
                 st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
                 return
             elif model == "Deepgram" and not get_secret("DEEPGRAM_API_KEY"):
@@ -1304,9 +1605,9 @@ def main():
                         temp_files_to_cleanup.append(trimmed_path)
                         audio_path = trimmed_path
                 if audio_path is not None:
-                    # Get diarize setting (only use if Deepgram is selected)
+                    # Get diarize setting (supported by both Deepgram and OpenAI)
                     model = st.session_state.get('model', 'Deepgram')
-                    diarize_setting = st.session_state.get('diarize', False) if model == "Deepgram" else False
+                    diarize_setting = st.session_state.get('diarize', False)
                     transcription = transcribe_large_file(
                         audio_path, 
                         model,
@@ -1364,11 +1665,15 @@ def main():
 
     # Model Selector (subtitle + select box, no bubble)
     # st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-top:1.5rem;margin-bottom:0.5rem;">Model</div>', unsafe_allow_html=True)
+    # Guard against a stale session value from before the "OpenAI Whisper" -> "OpenAI"
+    # rename (Streamlit raises if the stored value isn't among the options)
+    if st.session_state.get('model') not in ("Deepgram", "OpenAI"):
+        st.session_state['model'] = "Deepgram"
     model = st.selectbox(
         "Transcription Model",
-        ["Deepgram", "OpenAI Whisper"],
+        ["Deepgram", "OpenAI"],
         key='model',
-        help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
+        help="Choose the transcription service to use. OpenAI uses gpt-4o-transcribe (with automatic fallback to lighter models)."
     )
 
     # Language Selector (Español/Inglés)
@@ -1379,13 +1684,12 @@ def main():
         help="Select the language of the audio for better transcription accuracy."
     )
 
-    # Speaker Diarization Toggle (only for Deepgram)
+    # Speaker Diarization Toggle
     diarize_enabled = st.checkbox(
         "Identify different speakers (diarization)",
         key='diarize',
         value=True,  # Default to enabled
-        disabled=(model == "OpenAI Whisper"),
-        help="Enable speaker identification to show who said what. Only works with Deepgram model."
+        help="Enable speaker identification to show who said what. Works with both Deepgram and OpenAI."
     )
 
     # Other Info (polished, centered, no bubble)
