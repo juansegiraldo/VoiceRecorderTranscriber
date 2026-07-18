@@ -2,6 +2,10 @@ streamlit>=1.28.0
 openai>=1.101.0
 python-dotenv>=1.0.0
 pydub>=0.25.1
+# audioop was removed from the stdlib in Python 3.13; pydub needs this backport there.
+# The environment marker keeps it OFF Python <=3.12 installs (unconditional audioop-lts
+# broke the old 3.11 deployment — see git history / CLAUDE.md).
+audioop-lts>=0.2.1; python_version >= "3.13"
 pathlib2>=2.3.7
 deepgram-sdk>=3.0.0
 requests>=2.31.0
