@@ -1330,12 +1330,23 @@ def main():
     # everything downstream is source-agnostic.
     tab_local, tab_drive = st.tabs(["📁 Subir archivo", "☁️ Google Drive"])
     with tab_local:
+        # No `type=` filter on purpose: mobile pickers (notably Android/Chrome)
+        # translate the extension filter into MIME types and gray out valid files
+        # (.m4a is a known mismatch: audio/mp4 vs audio/x-m4a). Accept anything in
+        # the picker and validate the extension server-side instead.
         local_file = st.file_uploader(
             "Audio file",
-            type=allowed_types,
             help="Select an audio file to transcribe (MP3, WAV, M4A, MP4)" + (" (M4A/MP4 extraction requires FFmpeg)" if not ffmpeg_available else ""),
             label_visibility="collapsed"
         )
+        if local_file is not None:
+            _ext = local_file.name.split('.')[-1].lower()
+            if _ext not in allowed_types:
+                st.error(
+                    f"❌ Formato no soportado: .{_ext}. "
+                    f"Usa {', '.join(t.upper() for t in allowed_types)}."
+                )
+                local_file = None
     with tab_drive:
         drive_file = render_drive_tab()
 
