@@ -2,6 +2,11 @@ streamlit>=1.28.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 pydub>=0.25.1
+# stdlib audioop was removed in Python 3.13; pydub still imports it. The
+# environment marker is REQUIRED: installing audioop-lts unconditionally
+# breaks Python <=3.12 deployments (it needs 3.13+), and omitting it breaks
+# Python >=3.13 ones. Do not "simplify" this line.
+audioop-lts>=0.2.1; python_version >= "3.13"
 pathlib2>=2.3.7
 deepgram-sdk>=3.0.0
 requests>=2.31.0
