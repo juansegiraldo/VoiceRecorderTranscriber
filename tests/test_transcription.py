@@ -445,6 +445,48 @@ class TestDeepgramFallback(unittest.TestCase):
             tr.transcribe_with_deepgram(self.audio_path, "", language="es")
 
 
+class TestRatings(unittest.TestCase):
+    def test_pace_bands(self):
+        self.assertIsNone(tr._rate_pace(None))
+        self.assertEqual(tr._rate_pace(140)["level"], "good")
+        self.assertEqual(tr._rate_pace(110)["level"], "ok")
+        self.assertEqual(tr._rate_pace(170)["level"], "ok")
+        self.assertEqual(tr._rate_pace(90)["level"], "warn")
+        self.assertEqual(tr._rate_pace(200)["level"], "warn")
+
+    def test_silence_bands(self):
+        self.assertEqual(tr._rate_silence(0.15)["level"], "good")
+        self.assertEqual(tr._rate_silence(0.31)["level"], "ok")
+        self.assertEqual(tr._rate_silence(0.50)["level"], "warn")
+        self.assertEqual(tr._rate_silence(0.02)["level"], "ok")
+
+    def test_filler_bands(self):
+        self.assertEqual(tr._rate_fillers(0.0, 0)["level"], "good")
+        self.assertEqual(tr._rate_fillers(2.0, 5)["level"], "ok")
+        self.assertEqual(tr._rate_fillers(6.0, 12)["level"], "warn")
+
+    def test_sentiment_description(self):
+        self.assertEqual(tr.describe_sentiment_score(0.22), "neutral, tirando a positivo")
+        self.assertEqual(tr.describe_sentiment_score(0.0), "neutro")
+        self.assertEqual(tr.describe_sentiment_score(0.4), "positivo")
+        self.assertEqual(tr.describe_sentiment_score(-0.6), "claramente negativo")
+
+    def test_single_speaker_presentation_mode(self):
+        # 600 words in 5 minutes -> 120 wpm, inside the ideal band.
+        utterances = [utt(0, 0, 300, "palabra " * 600)]
+        insights = tr.compute_speech_insights(utterances, language="es")
+        self.assertTrue(any("Un solo hablante" in f for f in insights["feedback"]))
+        self.assertEqual(insights["per_speaker"][0]["pace_rating"]["level"], "good")
+        self.assertTrue(any("ritmo conversacional ideal" in f.lower() for f in insights["feedback"]))
+
+    def test_balanced_two_speakers_positive_feedback(self):
+        utterances = [utt(0, 0, 120, "a " * 250), utt(1, 121, 240, "b " * 250)]
+        insights = tr.compute_speech_insights(utterances, language="es")
+        self.assertTrue(any("equilibrado" in f.lower() for f in insights["feedback"]))
+        self.assertTrue(any("Sin interrupciones" in f for f in insights["feedback"]))
+        self.assertEqual(insights["overall"]["silence_rating"]["level"], "ok")
+
+
 class TestReport(unittest.TestCase):
     def test_report_contains_sections(self):
         utterances = [utt(0, 0, 30, "hola " * 50), utt(1, 30, 60, "adiós " * 50)]

@@ -27,8 +27,11 @@ print(f"Patched AudioSegment.ffmpeg to: {AudioSegment.ffmpeg}")
 # the same module backs scripts/deepgram_transcribe_cli.py). Imported after the
 # FFmpeg patch on principle; core only lazy-imports pydub when splitting.
 from core.transcription import (
+    METRIC_GUIDE_ES,
+    RATING_ICONS,
     WHISPER_MAX_CHUNK_MB,
     build_report,
+    describe_sentiment_score,
     sentiment_timeline_emoji,
     split_audio_file,
     transcribe_file_deepgram,
@@ -862,9 +865,15 @@ def main():
         if st.button("🎤 Start Transcription", type="primary"):
             model = st.session_state.get('model', 'Deepgram')
             # Obtener idioma seleccionado
-            language_ui = st.session_state.get('language', '🇪🇸 Español')
-            # Mapear a código de idioma
-            language_code = 'es' if 'es' in language_ui.lower() else 'en'
+            language_ui = st.session_state.get('language', '🌐 Auto (detectar idioma)')
+            # Mapear a código de idioma; None = el proveedor detecta el idioma
+            # (Deepgram vía detect_language, Whisper de forma nativa).
+            if 'auto' in language_ui.lower():
+                language_code = None
+            elif 'espa' in language_ui.lower():
+                language_code = 'es'
+            else:
+                language_code = 'en'
             if model == "OpenAI Whisper" and not get_secret("OPENAI_API_KEY"):
                 st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
                 return
@@ -1010,6 +1019,13 @@ def main():
         # rows + native meters — identity always carried by text, never color.
         analysis = st.session_state.get('analysis')
         if analysis:
+            meta_bits = []
+            if analysis.get("detected_language"):
+                meta_bits.append(f"🌐 Idioma detectado: {analysis['detected_language']}")
+            if analysis.get("model_used"):
+                meta_bits.append(f"modelo: {analysis['model_used']}")
+            if meta_bits:
+                st.caption(" · ".join(meta_bits))
             for warning in analysis.get("warnings", []):
                 st.caption(f"⚠️ {warning}")
 
@@ -1026,6 +1042,12 @@ def main():
                             f"{format_time(s['talk_time'])} · {s['words']} palabras{wpm_txt}"
                         )
                         st.progress(min(max(s['talk_share'], 0.0), 1.0))
+                        rating_notes = " · ".join(
+                            f"{RATING_ICONS.get(r['level'], 'ℹ️')} {r['note']}"
+                            for r in (s.get("pace_rating"), s.get("fillers_rating")) if r
+                        )
+                        if rating_notes:
+                            st.caption(rating_notes)
                     overall = insights["overall"]
                     st.caption(
                         f"{overall['n_speakers']} hablante(s) · {overall['total_words']} palabras · "
@@ -1040,14 +1062,29 @@ def main():
                     avg = sentiment["average"]
                     label_es = {"positive": "😊 Positivo", "neutral": "😐 Neutral",
                                 "negative": "🙁 Negativo"}.get(avg["sentiment"], avg["sentiment"])
-                    st.markdown(f"**Tono general:** {label_es} (score {avg['sentiment_score']:+.2f})")
+                    st.markdown(
+                        f"**Tono general:** {label_es} ({avg['sentiment_score']:+.2f}) — "
+                        f"{describe_sentiment_score(avg['sentiment_score'])}."
+                    )
+                    st.caption(
+                        "Escala −1…+1 · Deepgram etiqueta positivo a partir de +0.33 "
+                        "y negativo por debajo de −0.33."
+                    )
                     emoji_line = sentiment_timeline_emoji(sentiment)
                     if emoji_line:
                         st.markdown(f"**Evolución** (inicio → fin): {emoji_line}")
                     for speaker, sp in sorted(sentiment["per_speaker"].items(), key=lambda kv: str(kv[0])):
                         lab = {"positive": "positivo", "neutral": "neutral",
                                "negative": "negativo"}.get(sp["sentiment"], sp["sentiment"])
-                        st.markdown(f"- Speaker {speaker}: {lab} ({sp['sentiment_score']:+.2f})")
+                        st.markdown(
+                            f"- Speaker {speaker}: {lab} ({sp['sentiment_score']:+.2f} — "
+                            f"{describe_sentiment_score(sp['sentiment_score'])})"
+                        )
+
+            if insights or sentiment:
+                with st.expander("ℹ️ Cómo leer estas métricas"):
+                    for guide_line in METRIC_GUIDE_ES:
+                        st.markdown(f"- {guide_line}")
 
         st.markdown('<div style="height:0.5rem;"></div>', unsafe_allow_html=True)
         # Full-width download button (better on mobile than a half-width column).
@@ -1082,12 +1119,14 @@ def main():
         help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
     )
 
-    # Language Selector (Español/Inglés)
+    # Language Selector (Auto/Español/Inglés)
     language = st.selectbox(
         "Language",
-        ["🇪🇸 Español", "🇬🇧 English"],
+        ["🌐 Auto (detectar idioma)", "🇪🇸 Español", "🇬🇧 English"],
         key='language',
-        help="Select the language of the audio for better transcription accuracy."
+        help="Con 'Auto' el proveedor detecta el idioma solo (elige UN idioma dominante). "
+             "Fijar el idioma explícito afina algo la precisión en audios muy mezclados. "
+             "El análisis de sentimiento solo funciona con audio en inglés."
     )
 
     # Speaker Diarization Toggle (only for Deepgram)

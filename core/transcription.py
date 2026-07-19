@@ -774,6 +774,77 @@ FILLERS_EN = [
 _MONOLOGUE_GAP_S = 2.0       # gaps shorter than this don't break a monologue
 _INTERRUPTION_OVERLAP_S = 0.15
 
+# --- Benchmarks -------------------------------------------------------------
+# Orientative communication-coaching ranges used to qualify the raw numbers,
+# so the UI/report can say "good/ok/high" instead of leaving values bare.
+
+RATING_ICONS = {"good": "✅", "ok": "🟡", "warn": "⚠️", "info": "ℹ️"}
+
+METRIC_GUIDE_ES = [
+    "Ritmo: 120–160 palabras/min es el rango conversacional cómodo; <100 suena muy pausado y >180 acelerado.",
+    "Silencio: 10–25% de pausas es natural al hablar; bastante más sugiere dudas o cortes, bastante menos, atropello.",
+    "Muletillas: hasta ~3 por cada 100 palabras pasan desapercibidas; >5 empiezan a distraer.",
+    "Reparto del habla: en una conversación equilibrada nadie supera ~55–60% del tiempo.",
+    "Interrupciones: <1 por minuto es fluido; más indica solapamiento constante.",
+    "Sentimiento (Deepgram): escala −1…+1; ≥ +0.33 se etiqueta positivo y ≤ −0.33 negativo; entre medias, neutral.",
+    "Son rangos orientativos de coaching de comunicación — el contexto (entrevista, daily, venta) manda.",
+]
+
+
+def _rate_pace(wpm: float | None) -> dict | None:
+    """Qualify words-per-minute against the conversational 120–160 band."""
+    if wpm is None:
+        return None
+    if 120 <= wpm <= 160:
+        return {"level": "good", "note": f"ritmo conversacional ideal ({wpm:.0f} ppm; rango 120–160)"}
+    if 100 <= wpm < 120:
+        return {"level": "ok", "note": f"ritmo algo pausado ({wpm:.0f} ppm; ideal 120–160)"}
+    if 160 < wpm <= 180:
+        return {"level": "ok", "note": f"ritmo algo rápido ({wpm:.0f} ppm; ideal 120–160)"}
+    if wpm < 100:
+        return {"level": "warn", "note": f"ritmo muy pausado ({wpm:.0f} ppm; ideal 120–160)"}
+    return {"level": "warn", "note": f"ritmo muy rápido ({wpm:.0f} ppm; ideal 120–160)"}
+
+
+def _rate_fillers(per_100: float, total: int) -> dict:
+    if total == 0:
+        return {"level": "good", "note": "sin muletillas detectadas"}
+    if per_100 < 1.0:
+        return {"level": "good", "note": f"muletillas muy contenidas ({per_100:.1f} por 100 palabras)"}
+    if per_100 <= 3.0:
+        return {"level": "ok", "note": f"muletillas en rango normal ({per_100:.1f} por 100 palabras; ideal <3)"}
+    if per_100 <= 5.0:
+        return {"level": "warn", "note": f"muletillas notorias ({per_100:.1f} por 100 palabras; ideal <3)"}
+    return {"level": "warn", "note": f"muletillas muy frecuentes ({per_100:.1f} por 100 palabras; ideal <3)"}
+
+
+def _rate_silence(ratio: float) -> dict:
+    pct = ratio * 100
+    if ratio < 0.05:
+        return {"level": "ok", "note": f"casi sin pausas ({pct:.0f}% de silencio; típico 10–25%)"}
+    if ratio <= 0.25:
+        return {"level": "good", "note": f"pausas naturales ({pct:.0f}% de silencio; típico 10–25%)"}
+    if ratio <= 0.40:
+        return {"level": "ok", "note": f"bastantes pausas ({pct:.0f}% de silencio; típico 10–25%)"}
+    return {"level": "warn", "note": f"mucho silencio ({pct:.0f}%; típico 10–25% — ¿dudas, cortes o espera?)"}
+
+
+def describe_sentiment_score(score: float) -> str:
+    """Spanish nuance for a Deepgram sentiment score (−1…+1, labels at ±0.33)."""
+    if score >= 0.5:
+        return "claramente positivo"
+    if score >= 0.33:
+        return "positivo"
+    if score >= 0.1:
+        return "neutral, tirando a positivo"
+    if score > -0.1:
+        return "neutro"
+    if score > -0.33:
+        return "neutral, tirando a negativo"
+    if score > -0.5:
+        return "negativo"
+    return "claramente negativo"
+
 
 def _count_fillers(text: str, lexicon: list[str]) -> dict[str, int]:
     lowered = f" {text.lower()} "
@@ -820,7 +891,6 @@ def compute_speech_insights(
     utterances: list[dict],
     language: str | None = None,
     total_duration: float | None = None,
-    sentiment: dict | None = None,
 ) -> dict | None:
     """Per-speaker conversation metrics + human-readable feedback (Spanish).
 
@@ -878,6 +948,8 @@ def compute_speech_insights(
         s["fillers_per_100_words"] = (
             100.0 * s["fillers_total"] / s["words"] if s["words"] else 0.0
         )
+        s["pace_rating"] = _rate_pace(s["wpm"])
+        s["fillers_rating"] = _rate_fillers(s["fillers_per_100_words"], s["fillers_total"])
 
     # Voiced time union (utterances can overlap during cross-talk).
     voiced = 0.0
@@ -900,74 +972,102 @@ def compute_speech_insights(
         "wpm": total_words / (voiced / 60.0) if voiced >= 5.0 else None,
         "interruptions": interruptions_total,
         "silence_ratio": silence_ratio,
+        "silence_rating": _rate_silence(silence_ratio),
         "questions": sum(s["questions"] for s in per_speaker.values()),
     }
 
-    feedback = _build_feedback(per_speaker, overall, sentiment)
+    feedback = _build_feedback(per_speaker, overall)
     return {"per_speaker": per_speaker, "overall": overall, "feedback": feedback}
 
 
-def _build_feedback(per_speaker: dict, overall: dict, sentiment: dict | None) -> list[str]:
-    """Short, actionable Spanish feedback bullets derived from the metrics."""
+def _build_feedback(per_speaker: dict, overall: dict) -> list[str]:
+    """Evaluative Spanish feedback bullets.
+
+    Every session gets context (✅/🟡/⚠️ against the orientative coaching
+    ranges above), not just breach warnings — bare numbers don't tell the
+    user whether they're good or bad. Sentiment is deliberately NOT repeated
+    here; it has its own section in the UI/report.
+    """
     feedback: list[str] = []
     minutes = overall["duration"] / 60.0
+    n = overall["n_speakers"]
 
-    if overall["n_speakers"] >= 2:
+    def icon(rating: dict | None) -> str:
+        return RATING_ICONS.get(rating["level"], "ℹ️") if rating else "ℹ️"
+
+    if n == 1:
+        _speaker, s = next(iter(per_speaker.items()))
+        feedback.append(
+            "🎙️ Un solo hablante detectado — métricas en modo exposición/presentación "
+            "(el reparto e interrupciones no aplican)."
+        )
+        pr = s.get("pace_rating")
+        if pr:
+            feedback.append(f"{icon(pr)} {pr['note'][0].upper() + pr['note'][1:]}.")
+        fr = s.get("fillers_rating")
+        if fr and s["words"] >= 80:
+            listed = ""
+            if fr["level"] == "warn":
+                top_fillers = sorted(s["fillers"].items(), key=lambda kv: -kv[1])[:2]
+                listed = " — sobre todo " + ", ".join(f"«{w}» ({c}×)" for w, c in top_fillers)
+            feedback.append(f"{icon(fr)} {fr['note'][0].upper() + fr['note'][1:]}{listed}.")
+    else:
         top_speaker, top = max(per_speaker.items(), key=lambda kv: kv[1]["talk_share"])
-        if top["talk_share"] >= 0.65:
+        share = top["talk_share"]
+        if share >= 0.65:
             feedback.append(
-                f"🗣️ Speaker {top_speaker} dominó la conversación "
-                f"({top['talk_share'] * 100:.0f}% del tiempo de habla)."
+                f"⚠️ Speaker {top_speaker} dominó la conversación ({share * 100:.0f}% del habla; "
+                "en una reunión equilibrada nadie supera ~55–60%)."
             )
-        elif top["talk_share"] <= 0.55:
+        elif share <= 0.55:
             feedback.append(
-                f"⚖️ Conversación equilibrada entre {overall['n_speakers']} participantes."
+                f"✅ Reparto equilibrado entre {n} participantes "
+                f"(el que más habla, Speaker {top_speaker}, ocupa {share * 100:.0f}%)."
             )
-
-    for speaker, s in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
-        if s["wpm"] and s["wpm"] > 175:
+        else:
             feedback.append(
-                f"🏃 Speaker {speaker} habló rápido (~{s['wpm']:.0f} palabras/min); "
-                "un ritmo más pausado mejora la claridad."
-            )
-        elif s["wpm"] and s["wpm"] < 105 and s["talk_time"] > 60:
-            feedback.append(
-                f"🐢 Speaker {speaker} mantuvo un ritmo pausado (~{s['wpm']:.0f} palabras/min)."
+                f"🟡 Reparto algo cargado hacia Speaker {top_speaker} "
+                f"({share * 100:.0f}%; equilibrado es ≲55–60%)."
             )
 
-    for speaker, s in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
-        if s["fillers_total"] >= 4 and s["fillers_per_100_words"] >= 2.5:
-            top_fillers = sorted(s["fillers"].items(), key=lambda kv: -kv[1])[:2]
-            listed = ", ".join(f"«{w}» ({n}×)" for w, n in top_fillers)
-            feedback.append(f"🗨️ Speaker {speaker} usa muletillas con frecuencia: {listed}.")
+        for speaker, s in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
+            pr = s.get("pace_rating")
+            if pr and pr["level"] != "good" and s["talk_time"] >= 30:
+                feedback.append(f"{icon(pr)} Speaker {speaker}: {pr['note']}.")
 
-    if overall["interruptions"] >= 3 and minutes > 0 and overall["interruptions"] / minutes > 0.8:
-        feedback.append(
-            f"🔁 Hubo {overall['interruptions']} interrupciones/solapamientos; "
-            "dejar terminar las frases facilita el acta."
-        )
+        for speaker, s in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
+            fr = s.get("fillers_rating")
+            if fr and fr["level"] == "warn" and s["fillers_total"] >= 4:
+                top_fillers = sorted(s["fillers"].items(), key=lambda kv: -kv[1])[:2]
+                listed = ", ".join(f"«{w}» ({c}×)" for w, c in top_fillers)
+                feedback.append(f"{icon(fr)} Speaker {speaker}: {fr['note']} — {listed}.")
 
-    for speaker, s in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
-        if s["longest_monologue"] >= 120:
-            feedback.append(
-                f"⏱️ Monólogo de {_fmt_mmss(s['longest_monologue'])} de Speaker {speaker}; "
-                "intercalar preguntas mantiene la atención."
-            )
+        if minutes >= 2:
+            rate = overall["interruptions"] / minutes if minutes > 0 else 0.0
+            if overall["interruptions"] == 0:
+                feedback.append("✅ Sin interrupciones: los turnos se respetaron.")
+            elif rate > 1.0:
+                feedback.append(
+                    f"⚠️ {overall['interruptions']} interrupciones/solapamientos "
+                    f"({rate:.1f}/min; fluido es <1/min)."
+                )
+            else:
+                feedback.append(
+                    f"🟡 {overall['interruptions']} interrupciones/solapamientos "
+                    f"({rate:.1f}/min; fluido es <1/min)."
+                )
 
-    if sentiment and sentiment.get("average"):
-        avg = sentiment["average"]
-        label_es = {"positive": "positivo", "neutral": "neutral", "negative": "negativo"}.get(
-            avg.get("sentiment", "neutral"), "neutral"
-        )
-        feedback.append(
-            f"😊 Tono general {label_es} (score {avg.get('sentiment_score', 0.0):+.2f})."
-        )
-        for speaker, sp in sorted(sentiment.get("per_speaker", {}).items(), key=lambda kv: str(kv[0])):
-            if sp["sentiment"] == "negative":
-                feedback.append(f"⚠️ El tono de Speaker {speaker} fue mayormente negativo.")
+        for speaker, s in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
+            if s["longest_monologue"] >= 120:
+                feedback.append(
+                    f"⚠️ Monólogo de {_fmt_mmss(s['longest_monologue'])} de Speaker {speaker} "
+                    "(turnos de <2 min mantienen mejor la atención)."
+                )
 
-    if not feedback:
-        feedback.append("✅ Conversación sin señales destacables: ritmo y reparto razonables.")
+    sr = overall.get("silence_rating")
+    if sr:
+        feedback.append(f"{icon(sr)} {sr['note'][0].upper() + sr['note'][1:]}.")
+
     return feedback
 
 
@@ -1057,10 +1157,12 @@ def transcribe_file_deepgram(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     sentiment = summarize_sentiment(sentiment_points) if sentiment_points else None
-    if want_sentiment and sentiment is None and language == "en":
+    if want_sentiment and sentiment is None and language in (None, "en"):
         warnings.append(
             "Deepgram no devolvió datos de sentimiento para este audio "
-            "(la función requiere el modelo nova y audio en inglés)."
+            "(la función solo existe para audio en inglés y modelos nova"
+            + (f"; idioma detectado: {detected_language}" if detected_language else "")
+            + ")."
         )
 
     insights = None
@@ -1069,8 +1171,7 @@ def transcribe_file_deepgram(
             "en" if (detected_language or "").startswith("en") else "es"
         )
         insights = compute_speech_insights(
-            utterances, language=effective_language,
-            total_duration=duration, sentiment=sentiment,
+            utterances, language=effective_language, total_duration=duration,
         )
         if insights is None:
             warnings.append(
@@ -1234,6 +1335,12 @@ def build_report(result: dict, filename: str = "") -> str:
                 f"({_fmt_mmss(s['talk_time'])}), {s['words']} palabras, ritmo {wpm}, "
                 f"{s['turns']} turnos, {s['questions']} preguntas, muletillas: {fillers}"
             )
+            ratings = [s.get("pace_rating"), s.get("fillers_rating")]
+            notes = "; ".join(
+                f"{RATING_ICONS.get(r['level'], 'ℹ️')} {r['note']}" for r in ratings if r
+            )
+            if notes:
+                lines.append(f"    {notes}")
         overall = insights["overall"]
         lines.append(
             f"Global: {overall['n_speakers']} hablantes · {overall['total_words']} palabras · "
@@ -1253,15 +1360,27 @@ def build_report(result: dict, filename: str = "") -> str:
         label_es = {"positive": "positivo", "neutral": "neutral", "negative": "negativo"}.get(
             avg["sentiment"], avg["sentiment"]
         )
-        lines.append(f"Tono general: {label_es} (score {avg['sentiment_score']:+.2f})")
+        lines.append(
+            f"Tono general: {label_es} (score {avg['sentiment_score']:+.2f} — "
+            f"{describe_sentiment_score(avg['sentiment_score'])})"
+        )
         for speaker, sp in sorted(sentiment["per_speaker"].items(), key=lambda kv: str(kv[0])):
             label_sp = {"positive": "positivo", "neutral": "neutral", "negative": "negativo"}.get(
                 sp["sentiment"], sp["sentiment"]
             )
-            lines.append(f"  Speaker {speaker}: {label_sp} ({sp['sentiment_score']:+.2f})")
+            lines.append(
+                f"  Speaker {speaker}: {label_sp} ({sp['sentiment_score']:+.2f} — "
+                f"{describe_sentiment_score(sp['sentiment_score'])})"
+            )
         emoji_line = sentiment_timeline_emoji(sentiment)
         if emoji_line:
             lines.append(f"  Evolución: {emoji_line}")
+
+    if insights or sentiment:
+        lines.append("")
+        lines.append("── CÓMO LEER ESTAS MÉTRICAS ──")
+        for guide_line in METRIC_GUIDE_ES:
+            lines.append(f"  • {guide_line}")
 
     for warning in result.get("warnings", []):
         lines.append("")
