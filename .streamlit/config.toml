@@ -1,0 +1,10 @@
+# VoiceTranscriber v2 theme — see docs/rediseno-ux-v2.md.
+# Petrol accent on a cool-neutral paper; components in AppTranscribe.py's
+# V2_CSS assume these values.
+[theme]
+primaryColor = "#0E7263"
+backgroundColor = "#FAFBFA"
+secondaryBackgroundColor = "#F1F4F2"
+textColor = "#21272A"
+font = "sans serif"
+baseRadius = "10px"

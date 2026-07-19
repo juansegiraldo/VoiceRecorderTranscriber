@@ -1,4 +1,6 @@
-streamlit>=1.28.0
+# v2 UI needs st.popover/st.toggle/st.status + extended theming (baseRadius):
+# all present since Streamlit 1.46 (June 2025).
+streamlit>=1.46.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 pydub>=0.25.1

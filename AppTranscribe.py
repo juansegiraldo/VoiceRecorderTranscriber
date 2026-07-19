@@ -5,9 +5,10 @@ import requests
 from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
+import html
 import json
+import re
 import shutil
-import time
 import io
 import logging
 import imageio_ffmpeg
@@ -28,11 +29,9 @@ print(f"Patched AudioSegment.ffmpeg to: {AudioSegment.ffmpeg}")
 # FFmpeg patch on principle; core only lazy-imports pydub when splitting.
 from core.transcription import (
     METRIC_GUIDE_ES,
-    RATING_ICONS,
     WHISPER_MAX_CHUNK_MB,
     build_report,
     describe_sentiment_score,
-    sentiment_timeline_emoji,
     split_audio_file,
     transcribe_file_deepgram,
 )
@@ -125,53 +124,14 @@ def trim_audio_file(input_path: str, start_time_ms: int, end_time_ms: int, outpu
         logger.error(f"Error trimming {input_path}: {str(e)}")
         raise e
 
-# Page configuration
+# Page configuration. page_icon is the browser favicon (not in-app UI) — the
+# only emoji that survives the v2 redesign besides the plain-text report.
 st.set_page_config(
-    page_title="Voice Transcriber",
+    page_title="VoiceTranscriber",
     page_icon="🎤",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
-
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        color: #1f77b4;
-        margin-bottom: 2rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #666;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .success-box {
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        border-radius: 5px;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-    .error-box {
-        background-color: #f8d7da;
-        border: 1px solid #f5c6cb;
-        border-radius: 5px;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-    .info-box {
-        background-color: #d1ecf1;
-        border: 1px solid #bee5eb;
-        border-radius: 5px;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 def transcribe_with_openai(path: str, language: str = None) -> str:
     api_key = get_secret("OPENAI_API_KEY")
@@ -196,29 +156,29 @@ def transcribe_large_file_whisper(file_path: str, language: str = None, progress
     size (much higher limit) and diarization/speaker consistency itself.
     """
     if status_text:
-        status_text.text("🔍 Analyzing file...")
+        status_text.text("Analizando el archivo…")
     chunk_paths = split_audio_file(file_path, max_size_mb=WHISPER_MAX_CHUNK_MB)
     if len(chunk_paths) == 1:
         if status_text:
-            status_text.text("🎤 Transcribing file...")
+            status_text.text("Transcribiendo con Whisper…")
         return transcribe_with_openai(file_path, language)
     if status_text:
-        status_text.text(f"📦 File split into {len(chunk_paths)} chunks")
+        status_text.text(f"Archivo dividido en {len(chunk_paths)} partes")
     transcriptions = []
     temp_dir = os.path.dirname(chunk_paths[0])
     try:
         for i, chunk_path in enumerate(chunk_paths, 1):
             if status_text:
-                status_text.text(f"🎤 Processing chunk {i}/{len(chunk_paths)}...")
+                status_text.text(f"Procesando parte {i} de {len(chunk_paths)}…")
             if progress_bar:
                 progress_bar.progress(i / len(chunk_paths))
             try:
                 transcriptions.append(transcribe_with_openai(chunk_path, language))
                 if status_text:
-                    status_text.text(f"✅ Chunk {i} processed")
+                    status_text.text(f"Parte {i} lista")
             except Exception as e:
                 if status_text:
-                    status_text.text(f"❌ Error processing chunk {i}: {str(e)}")
+                    status_text.text(f"Error en la parte {i}: {str(e)}")
                 transcriptions.append(f"[Error in chunk {i}: {str(e)}]")
     finally:
         if temp_dir and os.path.exists(temp_dir):
@@ -428,7 +388,7 @@ def _handle_drive_oauth_callback():
     returned_state = params.get("state")
     verifier = _pkce_pop(returned_state) if returned_state else None
     if not verifier:
-        st.error("❌ Google login expiró o no se pudo validar. Pulsa el botón de nuevo.")
+        st.error("El inicio de sesión con Google expiró o no se pudo validar. Pulsa el botón de nuevo.")
         st.query_params.clear()
         return
     try:
@@ -440,7 +400,7 @@ def _handle_drive_oauth_callback():
         st.session_state.drive_creds = _credentials_to_dict(flow.credentials)
     except Exception as e:
         logger.error(f"Drive token exchange failed: {e}")
-        st.error(f"❌ Google login failed: {e}")
+        st.error(f"No se pudo completar el inicio de sesión con Google: {e}")
     finally:
         # Always clear the code so a rerun never re-uses it.
         st.query_params.clear()
@@ -526,7 +486,7 @@ def render_drive_tab():
     loaded one, else None."""
     if not _drive_configured():
         st.info(
-            "☁️ Google Drive no está configurado en este despliegue. "
+            "Google Drive no está configurado en este despliegue. "
             "Añade `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `GOOGLE_REDIRECT_URI` "
             "en los *secrets* para habilitarlo."
         )
@@ -534,16 +494,12 @@ def render_drive_tab():
 
     creds = _get_drive_credentials()
     if creds is None:
-        st.markdown(
-            '<div style="text-align:center;color:#666;margin-bottom:0.8rem;">'
-            'Inicia sesión con Google para elegir un audio de tu Drive.</div>',
-            unsafe_allow_html=True,
-        )
+        st.caption("Inicia sesión con Google para elegir un audio de tu Drive.")
         try:
             login_url = _get_drive_login_url()
-            st.link_button("🔑 Iniciar sesión con Google", login_url, use_container_width=True)
+            st.link_button("Iniciar sesión con Google", login_url, use_container_width=True)
         except Exception as e:
-            st.error(f"❌ No se pudo iniciar el login de Google: {e}")
+            st.error(f"No se pudo iniciar el login de Google: {e}")
         return None
 
     # Authenticated: list audio and let the user pick + load one.
@@ -551,7 +507,7 @@ def render_drive_tab():
         files = list_drive_audio(creds)
     except Exception as e:
         logger.error(f"Drive list failed: {e}")
-        st.error(f"❌ No se pudieron listar los archivos de Drive: {e}")
+        st.error(f"No se pudieron listar los archivos de Drive: {e}")
         if st.button("Cerrar sesión de Google", key="drive_logout_err"):
             st.session_state.pop("drive_creds", None)
             st.rerun()
@@ -576,8 +532,8 @@ def render_drive_tab():
     load_col, logout_col = st.columns([3, 1])
     loaded = None
     with load_col:
-        if st.button("☁️ Cargar de Drive", type="primary", key="drive_load_btn", use_container_width=True):
-            with st.spinner("Descargando de Google Drive..."):
+        if st.button("Cargar de Drive", type="primary", key="drive_load_btn", use_container_width=True):
+            with st.spinner("Descargando de Google Drive…"):
                 try:
                     loaded = download_drive_file(
                         creds, selected["id"], selected["name"], selected.get("mimeType")
@@ -585,7 +541,7 @@ def render_drive_tab():
                     st.session_state.drive_loaded_id = selected["id"]
                 except Exception as e:
                     logger.error(f"Drive download failed: {e}")
-                    st.error(f"❌ No se pudo descargar el archivo: {e}")
+                    st.error(f"No se pudo descargar el archivo: {e}")
     with logout_col:
         if st.button("Salir", key="drive_logout", use_container_width=True):
             st.session_state.pop("drive_creds", None)
@@ -603,60 +559,514 @@ def render_drive_tab():
     return loaded
 
 
-def main():
+# ---------------------------------------------------------------------------
+# v2 presentation layer (see docs/rediseno-ux-v2.md and the mockup in
+# docs/mockups/rediseno-v2.html). UI-only: core/transcription.py is untouched;
+# these helpers reshape its output for the screen. The downloadable .txt report
+# (build_report) keeps its emoji-based ratings — in plain text there is no
+# color, so there the emoji still does real work.
+# ---------------------------------------------------------------------------
+
+# Speaker colors: fixed order, CVD-validated on white. Identity is always
+# carried by the text label next to the swatch, never by color alone.
+SPEAKER_COLORS = ["#2A78D6", "#008300", "#E87BA4", "#EDA100"]
+
+# Visible label -> provider language code (None = auto-detect). Replaces the
+# old fragile substring sniffing ('auto' in label.lower()).
+LANGUAGE_OPTIONS = {
+    "Automático (detectar idioma)": None,
+    "Español": "es",
+    "Inglés": "en",
+}
+
+# The option VALUES "Deepgram" / "OpenAI Whisper" are load-bearing (the
+# pipeline compares those exact strings); only the visible label changes.
+MODEL_LABELS = {"Deepgram": "Deepgram — recomendado", "OpenAI Whisper": "OpenAI Whisper"}
+
+LANG_NAMES = {"es": "Español", "en": "Inglés"}
+RATING_WORDS = {"good": "Bien", "ok": "Justo", "warn": "Mejorable"}
+RATING_CSS = {"good": "b-good", "ok": "b-ok", "warn": "b-warn"}
+SENTIMENT_WORDS = {"positive": "Positivo", "neutral": "Neutral", "negative": "Negativo"}
+SENTIMENT_TEXT_COLORS = {"positive": "#1C5CAB", "neutral": "#4D5A55", "negative": "#B23636"}
+
+# Characters stripped from the FRONT of core-generated strings before showing
+# them in the UI (the .txt report keeps them).
+_UI_EMOJI_CHARS = "✅🟡⚠ℹ🔍🎤🎙📦😊😐🙁️ "
+
+_SPEAKER_RE = re.compile(r"\bSpeaker (\d+)\b")
+
+_PROGRESS_ES = [
+    (re.compile(r"Analyzing file"), "Analizando el archivo…"),
+    (re.compile(r"Transcribing with Deepgram"), "Transcribiendo con Deepgram…"),
+    (re.compile(r"File split into (\d+) chunks"), r"Archivo dividido en \1 partes"),
+    (re.compile(r"Processing chunk (\d+)/(\d+)"), r"Procesando parte \1 de \2…"),
+]
+
+
+def strip_ui_emoji(text) -> str:
+    return str(text).lstrip(_UI_EMOJI_CHARS)
+
+
+def humanize_feedback(text) -> str:
+    """Core feedback bullets say '⚠️ Speaker 0 …'; on screen we want
+    'Hablante 1 …' (1-based, Spanish, no emoji — the evaluation lives in the
+    words themselves)."""
+    return _SPEAKER_RE.sub(
+        lambda m: f"Hablante {int(m.group(1)) + 1}", strip_ui_emoji(text)
+    )
+
+
+def progress_message_es(message) -> str:
+    """Translate the few known core progress messages; fall back to the
+    emoji-stripped original for anything new."""
+    message = strip_ui_emoji(message)
+    for pat, repl in _PROGRESS_ES:
+        m = pat.search(message)
+        if m:
+            return m.expand(repl)
+    return message
+
+
+def speaker_name(speaker) -> str:
+    """Deepgram ids are 0-based ints; people count from 1."""
+    try:
+        return f"Hablante {int(speaker) + 1}"
+    except (TypeError, ValueError):
+        return f"Hablante {speaker}"
+
+
+def speaker_color(speaker, ordered_speakers) -> str:
+    try:
+        idx = list(ordered_speakers).index(speaker)
+    except ValueError:
+        idx = 0
+    return SPEAKER_COLORS[idx % len(SPEAKER_COLORS)]
+
+
+def fmt_int_es(n) -> str:
+    return f"{int(n):,}".replace(",", ".")
+
+
+def fmt_dec_es(x) -> str:
+    return f"{x:.1f}".replace(".", ",")
+
+
+def fmt_signed_es(x) -> str:
+    return f"{x:+.2f}".replace(".", ",")
+
+
+def rating_badge(rating) -> str:
+    """dict {'level', 'note'} -> small text chip (or '')."""
+    if not rating:
+        return ""
+    word = RATING_WORDS.get(rating.get("level"))
+    if not word:
+        return ""
+    css = RATING_CSS.get(rating.get("level"), "b-ok")
+    return f'<span class="vt-badge {css}">{word}</span>'
+
+
+def group_turns(utterances) -> list[dict]:
+    """Collapse consecutive same-speaker utterances into display turns."""
+    turns = []
+    for u in utterances or []:
+        text = (u.get("transcript") or "").strip()
+        if not text:
+            continue
+        sp = u.get("speaker", 0)
+        if turns and turns[-1]["speaker"] == sp:
+            turns[-1]["text"] += " " + text
+        else:
+            turns.append({"speaker": sp, "start": u.get("start") or 0.0, "text": text})
+    return turns
+
+
+def _sentiment_seg_color(score):
+    """Diverging scale for the timeline: blue positive <-> red negative,
+    neutral gray in the middle, None -> empty segment."""
+    if score is None:
+        return None
+    if score >= 0.5:
+        return "#1C5CAB"
+    if score >= 0.33:
+        return "#2A78D6"
+    if score >= 0.1:
+        return "#86B6EF"
+    if score > -0.1:
+        return "#ECEEED"
+    if score > -0.33:
+        return "#F0A1A0"
+    if score > -0.5:
+        return "#E34948"
+    return "#B23636"
+
+
+V2_CSS = """
+<style>
+html { -webkit-text-size-adjust: 100%; }
+/* 4.4rem clears Streamlit's fixed header without the default 6rem chasm */
+.block-container { max-width: 720px !important; margin: 0 auto; padding-top: 4.4rem !important; }
+@media (max-width: 600px) {
+  .block-container { padding-left: 0.9rem !important; padding-right: 0.9rem !important; }
+}
+/* Mobile-first tap targets (kept from v1) */
+.stButton > button, .stDownloadButton > button { width: 100%; min-height: 44px; }
+div[data-baseweb="select"] > div, .stNumberInput input, .stTextInput input {
+  min-height: 44px; font-size: 16px !important; /* >=16px stops iOS zoom-on-focus */
+}
+.stFileUploader { width: 100%; }
+/* Brand */
+.vt-brand { display: flex; align-items: center; justify-content: center; gap: 9px;
+  font-size: 1.45rem; font-weight: 700; letter-spacing: -0.01em; margin: 0.1rem 0 0.15rem; }
+.vt-wave { display: inline-flex; align-items: flex-end; gap: 2.5px; height: 17px; }
+.vt-wave i { width: 3.5px; border-radius: 2px; background: #0E7263; display: block; }
+.vt-wave i:nth-child(1) { height: 55%; }
+.vt-wave i:nth-child(2) { height: 100%; }
+.vt-wave i:nth-child(3) { height: 35%; }
+.vt-tagline { text-align: center; color: #6A7772; font-size: 0.9rem; margin-bottom: 1rem; }
+/* File card */
+.vt-file { background: #fff; border: 1px solid #E4E8E6; border-radius: 12px; padding: 0.7rem 0.9rem; }
+.vt-file-name { font-weight: 600; word-break: break-all; }
+.vt-file-meta { color: #6A7772; font-size: 0.86rem; margin-top: 1px; }
+.vt-summary { color: #6A7772; font-size: 0.86rem; line-height: 1.35; }
+/* Result header */
+.vt-h1 { font-weight: 700; font-size: 1.15rem; margin: 0.4rem 0 0.1rem; word-break: break-all; }
+.vt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0.35rem 0 0.5rem; }
+.vt-chip { background: #F1F4F2; color: #4D5A55; border-radius: 999px; padding: 2px 10px;
+  font-size: 0.8rem; font-weight: 600; }
+/* Transcript turns */
+.vt-turn { padding: 0.55rem 0; border-bottom: 1px solid #EEF1EF; }
+.vt-turn:last-child { border-bottom: none; }
+.vt-who { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 0.9rem; }
+.vt-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.vt-ts { font-family: monospace; font-size: 0.75rem; color: #9AA7A1; font-weight: 400; }
+.vt-turn p { margin: 0.25rem 0 0; line-height: 1.55; }
+.vt-plain { white-space: pre-wrap; line-height: 1.55; background: #fff;
+  border: 1px solid #E4E8E6; border-radius: 12px; padding: 0.8rem 1rem; }
+/* Metric tiles */
+.vt-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0.4rem 0 0.2rem; }
+@media (max-width: 480px) { .vt-tiles { grid-template-columns: repeat(2, 1fr); } }
+.vt-tile { background: #fff; border: 1px solid #E4E8E6; border-radius: 10px; padding: 0.55rem 0.7rem; }
+.vt-tile .v { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em; }
+.vt-tile .l { font-size: 0.74rem; color: #6A7772; margin-top: 1px; }
+/* Text badges (replace the on-screen emoji ratings) */
+.vt-badge { display: inline-block; border-radius: 6px; padding: 1px 7px; font-size: 0.72rem;
+  font-weight: 700; vertical-align: 1px; }
+.b-good { background: #E5F3E5; color: #175617; }
+.b-ok { background: #FBF0D7; color: #7A4E00; }
+.b-warn { background: #FBE7DE; color: #8C3E1A; }
+/* Talk-share bars */
+.vt-sect { font-weight: 600; font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+.vt-bar { display: grid; grid-template-columns: 108px 1fr 44px; align-items: center; gap: 9px; margin: 5px 0; }
+.vt-bar .n { display: flex; align-items: center; gap: 6px; font-size: 0.84rem; font-weight: 600; }
+.vt-bar .t { background: #F1F4F2; border-radius: 5px; height: 13px; overflow: hidden; }
+.vt-bar .t i { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+.vt-bar .v { font-size: 0.84rem; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+/* Per-speaker cards */
+.vt-spcard { background: #fff; border: 1px solid #E4E8E6; border-radius: 10px;
+  padding: 0.6rem 0.8rem; margin-top: 7px; font-size: 0.86rem; color: #4D5A55; }
+.vt-spcard .vt-who { margin-bottom: 2px; color: inherit; }
+.vt-spnote { font-size: 0.78rem; color: #6A7772; margin-top: 3px; }
+/* Sentiment */
+.vt-tone { display: flex; align-items: baseline; gap: 9px; margin-top: 0.4rem; }
+.vt-tone .w { font-size: 1.4rem; font-weight: 700; }
+.vt-tone .s { color: #6A7772; font-variant-numeric: tabular-nums; }
+.vt-tl { display: flex; gap: 2px; height: 26px; margin: 6px 0 3px; }
+.vt-tl i { flex: 1; border-radius: 3px; }
+.vt-tl i.empty { background: transparent; border: 1px dashed #D5DBD8; }
+.vt-tlx { display: flex; justify-content: space-between; font-family: monospace;
+  font-size: 0.72rem; color: #9AA7A1; }
+.vt-leg { display: flex; gap: 14px; font-size: 0.8rem; color: #4D5A55; margin-top: 6px; flex-wrap: wrap; }
+.vt-leg span { display: inline-flex; align-items: center; gap: 5px; }
+.vt-leg i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+/* Footer */
+.vt-footer { text-align: center; color: #9AA7A1; font-size: 0.82rem; line-height: 1.7; margin-top: 0.6rem; }
+.vt-footer a { color: #0E7263; }
+</style>
+"""
+
+
+def render_settings_row():
+    """One-line summary + an 'Ajustes' popover. Rendered BEFORE the CTA so the
+    widget keys ('model', 'language', 'diarize', 'insights', 'sentiment') are
+    populated when the transcription handler reads them from session_state."""
+    model_now = st.session_state.get("model", "Deepgram")
+    lang_label = st.session_state.get("language", next(iter(LANGUAGE_OPTIONS)))
+    lang_short = lang_label.split(" (")[0].lower()
+    diar_txt = "diarización sí" if st.session_state.get("diarize", True) else "diarización no"
+    summary = f"{model_now} · idioma {lang_short} · {diar_txt}"
+
+    col_sum, col_pop = st.columns([2.4, 1], vertical_alignment="center")
+    with col_sum:
+        st.markdown(f'<div class="vt-summary">{html.escape(summary)}</div>', unsafe_allow_html=True)
+    with col_pop:
+        with st.popover("Ajustes", use_container_width=True):
+            model = st.selectbox(
+                "Modelo de transcripción",
+                list(MODEL_LABELS),
+                key="model",
+                format_func=lambda v: MODEL_LABELS.get(v, v),
+                help="Deepgram añade hablantes, métricas y sentimiento; Whisper devuelve solo texto.",
+            )
+            st.selectbox(
+                "Idioma del audio",
+                list(LANGUAGE_OPTIONS),
+                key="language",
+                help="Con «Automático» el proveedor detecta el idioma dominante. "
+                     "Fijarlo afina algo la precisión en audios muy mezclados.",
+            )
+            whisper = model == "OpenAI Whisper"
+            st.toggle(
+                "Identificar hablantes (diarización)",
+                key="diarize", value=True, disabled=whisper,
+                help="Muestra quién dijo qué. Solo con Deepgram.",
+            )
+            st.toggle(
+                "Métricas de conversación",
+                key="insights", value=True, disabled=whisper,
+                help="Reparto del habla, ritmo, interrupciones, monólogos y muletillas, "
+                     "con observaciones. Funciona en español e inglés.",
+            )
+            st.toggle(
+                "Análisis de sentimiento",
+                key="sentiment", value=False, disabled=whisper,
+                help="Deepgram solo lo ofrece para audio en inglés; en español se omite con un aviso.",
+            )
+
+
+def render_transcript_tab(transcription: str, analysis: dict | None):
+    turns = group_turns((analysis or {}).get("utterances"))
+    if turns:
+        order = sorted({t["speaker"] for t in turns}, key=str)
+        parts = []
+        for t in turns:
+            color = speaker_color(t["speaker"], order)
+            parts.append(
+                f'<div class="vt-turn"><div class="vt-who">'
+                f'<span class="vt-dot" style="background:{color}"></span>'
+                f'{html.escape(speaker_name(t["speaker"]))}'
+                f'<span class="vt-ts">{format_time(t["start"])}</span></div>'
+                f'<p>{html.escape(t["text"])}</p></div>'
+            )
+        st.markdown(f'<div class="vt-transcript">{"".join(parts)}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="vt-plain">{html.escape(transcription)}</div>', unsafe_allow_html=True)
+
+
+def render_metrics_tab(insights: dict):
+    o = insights["overall"]
+    tiles = [
+        (str(o["n_speakers"]), "hablantes", None),
+        (fmt_int_es(o["total_words"]), "palabras", None),
+        (f"{o['wpm']:.0f}" if o.get("wpm") else "—", "palabras/min", None),
+        (str(o["interruptions"]), "interrupciones", None),
+        (f"{o['silence_ratio'] * 100:.0f}%", "de silencio", o.get("silence_rating")),
+        (str(o["questions"]), "preguntas", None),
+    ]
+    tile_html = "".join(
+        f'<div class="vt-tile"><div class="v">{v}</div><div class="l">{l} {rating_badge(r)}</div></div>'
+        for v, l, r in tiles
+    )
+    st.markdown(f'<div class="vt-tiles">{tile_html}</div>', unsafe_allow_html=True)
+
+    ordered = sorted(insights["per_speaker"].items(), key=lambda kv: str(kv[0]))
+    order_ids = [sp for sp, _ in ordered]
+
+    bars = []
+    for sp, s in ordered:
+        color = speaker_color(sp, order_ids)
+        share = min(max(s.get("talk_share", 0.0), 0.0), 1.0)
+        bars.append(
+            f'<div class="vt-bar"><span class="n">'
+            f'<span class="vt-dot" style="background:{color}"></span>{html.escape(speaker_name(sp))}</span>'
+            f'<div class="t"><i style="width:{share * 100:.0f}%;background:{color}"></i></div>'
+            f'<span class="v">{share * 100:.0f}%</span></div>'
+        )
+    st.markdown('<div class="vt-sect">Reparto del habla</div>' + "".join(bars), unsafe_allow_html=True)
+
+    cards = []
+    for sp, s in ordered:
+        color = speaker_color(sp, order_ids)
+        stats = [f"{format_time(s['talk_time'])} en uso de palabra", f"{fmt_int_es(s['words'])} palabras"]
+        if s.get("wpm"):
+            stats.append(f"{s['wpm']:.0f} ppm {rating_badge(s.get('pace_rating'))}")
+        stats.append(
+            f"muletillas {fmt_dec_es(s.get('fillers_per_100_words', 0.0))}/100 "
+            f"{rating_badge(s.get('fillers_rating'))}"
+        )
+        notes = " · ".join(
+            html.escape(r["note"]) for r in (s.get("pace_rating"), s.get("fillers_rating")) if r
+        )
+        cards.append(
+            f'<div class="vt-spcard"><div class="vt-who">'
+            f'<span class="vt-dot" style="background:{color}"></span>{html.escape(speaker_name(sp))}</div>'
+            f'{" · ".join(stats)}'
+            + (f'<div class="vt-spnote">{notes}</div>' if notes else "")
+            + "</div>"
+        )
+    st.markdown("".join(cards), unsafe_allow_html=True)
+
+    if insights.get("feedback"):
+        st.markdown('<div class="vt-sect">Observaciones</div>', unsafe_allow_html=True)
+        for item in insights["feedback"]:
+            st.markdown(f"- {humanize_feedback(item)}")
+
+    with st.expander("Cómo leer estas métricas"):
+        for guide_line in METRIC_GUIDE_ES:
+            st.markdown(f"- {guide_line}")
+
+
+def render_sentiment_tab(sentiment: dict):
+    avg = sentiment["average"]
+    score = avg["sentiment_score"]
+    word = SENTIMENT_WORDS.get(avg["sentiment"], str(avg["sentiment"]))
+    color = SENTIMENT_TEXT_COLORS.get(avg["sentiment"], "#4D5A55")
     st.markdown(
-        '''<style>
-        html {
-            -webkit-text-size-adjust: 100%; /* stop iOS from resizing text unexpectedly */
-        }
-        body, .main, .block-container {
-            background: #fafbfc !important;
-        }
-        .block-container {
-            max-width: 720px !important; /* Increased from 540px to ~33% wider */
-            margin-left: auto;
-            margin-right: auto;
-        }
-        @media (max-width: 900px) {
-            .block-container {
-                max-width: 98vw !important;
-                padding: 0.5rem !important;
-            }
-        }
-        @media (max-width: 600px) {
-            .block-container {
-                max-width: 100% !important;
-                padding: 0.5rem !important;
-            }
-        }
-        /* --- Mobile-friendly tap targets --- */
-        /* Full-width primary buttons and download button for easy thumb taps */
-        .stButton > button,
-        .stDownloadButton > button {
-            width: 100%;
-            min-height: 44px; /* Apple/Google recommended minimum touch target */
-        }
-        /* Comfortable height for select boxes and number inputs on touch */
-        div[data-baseweb="select"] > div,
-        .stNumberInput input,
-        .stTextInput input {
-            min-height: 44px;
-            font-size: 16px !important; /* >=16px prevents iOS auto-zoom on focus */
-        }
-        /* File uploader: full width and a bit more breathing room */
-        .stFileUploader {
-            width: 100%;
-        }
-        </style>''', unsafe_allow_html=True)
+        f'<div class="vt-tone"><span class="w" style="color:{color}">{html.escape(word)}</span>'
+        f'<span class="s">{fmt_signed_es(score)}</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"Tono general de la conversación: {describe_sentiment_score(score)}.")
+
+    timeline = sentiment.get("timeline") or []
+    if timeline:
+        segs = []
+        for b in timeline:
+            seg_color = _sentiment_seg_color(b.get("score"))
+            label = f'{format_time(b.get("start", 0))}–{format_time(b.get("end", 0))}'
+            if b.get("score") is not None:
+                label += f': {fmt_signed_es(b["score"])}'
+            else:
+                label += ": sin datos"
+            if seg_color is None:
+                segs.append(f'<i class="empty" title="{label}"></i>')
+            else:
+                segs.append(f'<i style="background:{seg_color}" title="{label}"></i>')
+        st.markdown(
+            '<div class="vt-sect">Evolución (inicio → fin)</div>'
+            f'<div class="vt-tl">{"".join(segs)}</div>'
+            f'<div class="vt-tlx"><span>{format_time(timeline[0].get("start", 0))}</span>'
+            f'<span>{format_time(timeline[-1].get("end", 0))}</span></div>'
+            '<div class="vt-leg">'
+            '<span><i style="background:#2A78D6"></i>Positivo</span>'
+            '<span><i style="background:#ECEEED;border:1px solid #D5DBD8"></i>Neutral</span>'
+            '<span><i style="background:#E34948"></i>Negativo</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    per_speaker = sentiment.get("per_speaker") or {}
+    if per_speaker:
+        st.markdown('<div class="vt-sect">Por hablante</div>', unsafe_allow_html=True)
+        rows = []
+        for sp, spdata in sorted(per_speaker.items(), key=lambda kv: str(kv[0])):
+            sp_word = SENTIMENT_WORDS.get(spdata["sentiment"], str(spdata["sentiment"]))
+            rows.append(
+                f'<div class="vt-spcard"><div class="vt-who">{html.escape(speaker_name(sp))}</div>'
+                f'{html.escape(sp_word)} · {fmt_signed_es(spdata["sentiment_score"])} — '
+                f'{html.escape(describe_sentiment_score(spdata["sentiment_score"]))}</div>'
+            )
+        st.markdown("".join(rows), unsafe_allow_html=True)
+
+    st.caption(
+        "Escala −1…+1 · positivo desde +0,33 y negativo desde −0,33. "
+        "Deepgram solo analiza sentimiento en audio en inglés."
+    )
+
+
+def render_results():
+    transcription = st.session_state.transcription
+    analysis = st.session_state.get("analysis")
+    filename = st.session_state.get("filename", "audio")
+    base = filename.split(".")[0]
+    insights = (analysis or {}).get("insights")
+    sentiment = (analysis or {}).get("sentiment")
+
+    st.markdown(f'<div class="vt-h1">{html.escape(base)}</div>', unsafe_allow_html=True)
+    chips = []
+    if analysis:
+        detected = analysis.get("detected_language")
+        if detected:
+            chips.append(f"{LANG_NAMES.get(detected, detected)} · detectado")
+        if analysis.get("model_used"):
+            chips.append(str(analysis["model_used"]))
+        duration = analysis.get("duration") or (insights or {}).get("overall", {}).get("duration")
+        if duration:
+            chips.append(format_time(duration))
+    if chips:
+        st.markdown(
+            '<div class="vt-chips">'
+            + "".join(f'<span class="vt-chip">{html.escape(c)}</span>' for c in chips)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+    for warning in (analysis or {}).get("warnings", []):
+        st.caption(f"Aviso: {strip_ui_emoji(warning)}")
+
+    tab_names = (
+        ["Transcripción"]
+        + (["Métricas"] if insights else [])
+        + (["Sentimiento"] if sentiment else [])
+    )
+    if len(tab_names) == 1:
+        render_transcript_tab(transcription, analysis)
+    else:
+        tabs = st.tabs(tab_names)
+        with tabs[0]:
+            render_transcript_tab(transcription, analysis)
+        next_tab = 1
+        if insights:
+            with tabs[next_tab]:
+                render_metrics_tab(insights)
+            next_tab += 1
+        if sentiment:
+            with tabs[next_tab]:
+                render_sentiment_tab(sentiment)
+
+    download_data = transcription.encode("utf-8")
+    if analysis and (insights or sentiment):
+        report_data = build_report(analysis, filename=filename).encode("utf-8")
+        col_txt, col_rep = st.columns(2)
+        with col_txt:
+            st.download_button(
+                "Descargar .txt", data=download_data,
+                file_name=f"{base}_transcript.txt", mime="text/plain",
+                use_container_width=True,
+            )
+        with col_rep:
+            st.download_button(
+                "Descargar informe completo", data=report_data,
+                file_name=f"{base}_report.txt", mime="text/plain",
+                use_container_width=True,
+                help="Transcripción + métricas y sentimiento en un solo archivo de texto",
+            )
+    else:
+        st.download_button(
+            "Descargar .txt", data=download_data,
+            file_name=f"{base}_transcript.txt", mime="text/plain",
+            use_container_width=True,
+        )
+    st.button(
+        "Generar acta", disabled=True, use_container_width=True,
+        help="Llega con la Fase 1 del roadmap: acta estructurada con IA "
+             "a partir de la transcripción y tus notas.",
+    )
+    st.caption("«Generar acta» llega con la Fase 1 del roadmap; de momento puedes usar el GPT del pie de página.")
+
+
+def main():
+    st.markdown(V2_CSS, unsafe_allow_html=True)
 
     # Complete any pending Google Drive OAuth redirect before rendering the UI.
     _handle_drive_oauth_callback()
 
-    # Logo and App Name (centered, no bubble)
-    st.markdown('<div style="text-align:center;margin-bottom:1.2rem;"><span style="font-size:2.2rem;">🎤</span><div style="font-size:2rem;font-weight:700;margin-top:0.5rem;">Voice Transcriber</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="vt-brand"><span class="vt-wave"><i></i><i></i><i></i></span>'
+        'VoiceTranscriber</div>'
+        '<div class="vt-tagline">Transcribe y analiza tus reuniones</div>',
+        unsafe_allow_html=True,
+    )
 
-    # Transcription Section
-    st.markdown('<div style="font-size:1.3rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Insert audio file</div>', unsafe_allow_html=True)
     allowed_types = ['mp3', 'wav']
     if ffmpeg_available:
         allowed_types.append('m4a')
@@ -665,13 +1075,17 @@ def main():
     # Two input sources: a local upload or a file from the user's Google Drive.
     # Both converge on `uploaded_file` (a real UploadedFile or a DriveFile);
     # everything downstream is source-agnostic.
-    tab_local, tab_drive = st.tabs(["📁 Subir archivo", "☁️ Google Drive"])
+    tab_local, tab_drive = st.tabs(["Archivo", "Google Drive"])
     with tab_local:
+        # The uploader key embeds a nonce so "Quitar" can clear the selection
+        # by remounting the widget (Streamlit has no programmatic clear).
         local_file = st.file_uploader(
-            "Audio file",
+            "Archivo de audio",
             type=allowed_types,
-            help="Select an audio file to transcribe (MP3, WAV, M4A, MP4)" + (" (M4A/MP4 extraction requires FFmpeg)" if not ffmpeg_available else ""),
-            label_visibility="collapsed"
+            help="MP3, WAV, M4A o MP4"
+                 + ("" if ffmpeg_available else " — M4A/MP4 no disponibles en este servidor (falta FFmpeg)"),
+            label_visibility="collapsed",
+            key=f"uploader_{st.session_state.get('uploader_nonce', 0)}",
         )
     with tab_drive:
         drive_file = render_drive_tab()
@@ -690,9 +1104,6 @@ def main():
     # Audio trimming section
     trim_settings = None
     if uploaded_file is not None:
-        # Show file info
-        #st.markdown(f'<div style="margin:0.5rem 0 0.7rem 0;font-size:1rem;color:#444;text-align:center;">📄 {uploaded_file.name} <span style="color:#888;font-size:0.95rem;">{len(uploaded_file.getvalue())/1024/1024:.1f}MB</span></div>', unsafe_allow_html=True)
-        
         # Check if we need to load audio info (only if file changed or not cached)
         file_key = f"{uploaded_file.name}_{uploaded_file.size}_{uploaded_file.type}"
         file_extension = uploaded_file.name.split('.')[-1].lower()
@@ -730,7 +1141,7 @@ def main():
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
                 if file_extension == 'm4a':
-                    with st.spinner("🔄 Converting M4A to MP3..."):
+                    with st.spinner("Convirtiendo M4A a MP3…"):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
                             mp3_file_path = mp3_tmp_file.name
                         converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_tmp_file.name)
@@ -739,7 +1150,7 @@ def main():
                         st.session_state.converted_mp3_path = audio_path
                         st.session_state.converted_mp3_file_key = file_key
                 elif file_extension == 'mp4':
-                    with st.spinner("🔄 Extracting audio from MP4..."):
+                    with st.spinner("Extrayendo el audio del MP4…"):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
                             mp3_file_path = mp3_tmp_file.name
                         # Use ffmpeg to extract audio from MP4
@@ -773,17 +1184,29 @@ def main():
                 }
                 st.session_state.current_file_key = file_key
             except Exception as e:
-                st.error(f"❌ Error loading audio file: {str(e)}")
+                st.error(f"No se pudo leer el archivo de audio: {str(e)}")
                 trim_settings = None
                 return
         audio_info = st.session_state.audio_info
         duration_seconds = audio_info['duration_seconds']
-        
-        # Show audio info
-        st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">🎵 Duration: {format_time(duration_seconds)}</div>', unsafe_allow_html=True)
-        
-        # Trimming controls
-        st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-bottom:0.5rem;text-align:center;">Audio Trimming (Optional)</div>', unsafe_allow_html=True)
+
+        # File card with a remove action ("Quitar" clears the selection by
+        # remounting the uploader through its nonce key).
+        size_mb = uploaded_file.size / 1024 / 1024
+        card_col, remove_col = st.columns([4, 1], vertical_alignment="center")
+        with card_col:
+            st.markdown(
+                f'<div class="vt-file"><div class="vt-file-name">{html.escape(uploaded_file.name)}</div>'
+                f'<div class="vt-file-meta">{format_time(duration_seconds)} · {fmt_dec_es(size_mb)} MB</div></div>',
+                unsafe_allow_html=True,
+            )
+        with remove_col:
+            if st.button("Quitar", key="remove_file", use_container_width=True):
+                st.session_state.uploader_nonce = st.session_state.get("uploader_nonce", 0) + 1
+                for stale_key in ("drive_loaded_id", "drive_download_cache",
+                                  "last_input_source", "current_file_key", "audio_info"):
+                    st.session_state.pop(stale_key, None)
+                st.rerun()
 
         max_seconds = float(duration_seconds)
 
@@ -812,365 +1235,211 @@ def main():
                 st.session_state.trim_start_input = s
             st.session_state.trim_range_slider = (s, e)
 
-        # Coarse selection: two-handle range slider
-        st.slider(
-            "Select audio range to transcribe",
-            min_value=0.0,
-            max_value=max_seconds,
-            step=0.1,
-            format="%.1f s",
-            help="Select the portion of the audio to transcribe (start and end times)",
-            key="trim_range_slider",
-            on_change=_sync_from_slider,
+        # Trimming lives collapsed; the expander label carries the current
+        # state (on_change callbacks ran before this line, so it's fresh).
+        s_now, e_now = st.session_state.trim_range_slider
+        is_trimmed = s_now > 0.05 or e_now < max_seconds - 0.05
+        trim_label = (
+            f"Recortar audio — {format_time(s_now)} a {format_time(e_now)}"
+            + (" (recortado)" if is_trimmed else " (completo)")
         )
-
-        # Precise entry (much easier than dragging on a phone): numeric start/end
-        num_col1, num_col2 = st.columns(2)
-        with num_col1:
-            st.number_input(
-                "Start (s)",
+        with st.expander(trim_label, expanded=False):
+            # Coarse selection: two-handle range slider
+            st.slider(
+                "Rango a transcribir",
                 min_value=0.0,
                 max_value=max_seconds,
                 step=0.1,
-                format="%.1f",
-                key="trim_start_input",
-                on_change=_sync_from_numbers,
+                format="%.1f s",
+                key="trim_range_slider",
+                on_change=_sync_from_slider,
             )
-        with num_col2:
-            st.number_input(
-                "End (s)",
-                min_value=0.0,
-                max_value=max_seconds,
-                step=0.1,
-                format="%.1f",
-                key="trim_end_input",
-                on_change=_sync_from_numbers,
+            # Precise entry (much easier than dragging on a phone)
+            num_col1, num_col2 = st.columns(2)
+            with num_col1:
+                st.number_input(
+                    "Inicio (s)",
+                    min_value=0.0,
+                    max_value=max_seconds,
+                    step=0.1,
+                    format="%.1f",
+                    key="trim_start_input",
+                    on_change=_sync_from_numbers,
+                )
+            with num_col2:
+                st.number_input(
+                    "Fin (s)",
+                    min_value=0.0,
+                    max_value=max_seconds,
+                    step=0.1,
+                    format="%.1f",
+                    key="trim_end_input",
+                    on_change=_sync_from_numbers,
+                )
+            s_prev, e_prev = st.session_state.trim_range_slider
+            st.caption(
+                f"Se transcribirá {format_time(s_prev)} – {format_time(e_prev)} "
+                f"({format_time(e_prev - s_prev)} en total)"
             )
 
         start_time, end_time = st.session_state.trim_range_slider
 
-        # Show trim preview
-        trim_duration = end_time - start_time
-        st.markdown(f'<div style="font-size:0.9rem;color:#666;text-align:center;margin-bottom:1rem;">✂️ Will transcribe: {format_time(start_time)} - {format_time(end_time)} ({format_time(trim_duration)} total)</div>', unsafe_allow_html=True)
-        
-        # Store trim settings
         trim_settings = {
             'start_time_ms': int(start_time * 1000),
             'end_time_ms': int(end_time * 1000),
             'duration_ms': audio_info['duration_ms']
         }
     
-    st.markdown('<div style="margin-top:1.2rem;font-size:1.1rem;font-weight:600;text-align:center;">Results</div>', unsafe_allow_html=True)
+    # Settings render BEFORE the CTA so their session_state keys are always
+    # populated when the click handler reads them (P1 fix: they used to live
+    # below the results).
+    render_settings_row()
+
     if uploaded_file is not None:
-        if st.button("🎤 Start Transcription", type="primary"):
+        if st.button("Transcribir", type="primary", use_container_width=True):
             model = st.session_state.get('model', 'Deepgram')
-            # Obtener idioma seleccionado
-            language_ui = st.session_state.get('language', '🌐 Auto (detectar idioma)')
-            # Mapear a código de idioma; None = el proveedor detecta el idioma
-            # (Deepgram vía detect_language, Whisper de forma nativa).
-            if 'auto' in language_ui.lower():
-                language_code = None
-            elif 'espa' in language_ui.lower():
-                language_code = 'es'
-            else:
-                language_code = 'en'
+            # None = the provider auto-detects the language (Deepgram via
+            # detect_language, Whisper natively).
+            language_code = LANGUAGE_OPTIONS.get(st.session_state.get('language'))
             if model == "OpenAI Whisper" and not get_secret("OPENAI_API_KEY"):
-                st.error("❌ OpenAI API key not found. Please enter it in a .env file.")
+                st.error("Falta la clave de OpenAI: añade `OPENAI_API_KEY` en los *secrets* o en un archivo `.env`.")
                 return
             elif model == "Deepgram" and not get_secret("DEEPGRAM_API_KEY"):
-                st.error("❌ Deepgram API key not found. Please enter it in a .env file.")
+                st.error("Falta la clave de Deepgram: añade `DEEPGRAM_API_KEY` en los *secrets* o en un archivo `.env`.")
                 return
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            try:
-                # Create a fresh temporary file for transcription
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_file_path = tmp_file.name
-                file_extension = uploaded_file.name.split('.')[-1].lower()
-                temp_files_to_cleanup = [tmp_file_path]
-                # Use cached MP3 if available (to avoid re-conversion)
-                audio_path: str = tmp_file_path  # Default
-                use_cached_mp3 = False
-                if file_extension == 'm4a' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
-                    if st.session_state.converted_mp3_path is not None:
-                        audio_path = st.session_state.converted_mp3_path
-                        use_cached_mp3 = True
-                elif file_extension == 'mp4' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
-                    if st.session_state.converted_mp3_path is not None:
-                        audio_path = st.session_state.converted_mp3_path
-                        use_cached_mp3 = True
-                
-                # Only convert if we don't have a cached MP3
-                if not use_cached_mp3:
-                    if file_extension == 'm4a':
-                        if status_text:
-                            status_text.text("🔄 Converting M4A to MP3...")
-                        time.sleep(0.5)
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
-                            mp3_file_path = mp3_tmp_file.name
-                        converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
-                        temp_files_to_cleanup.append(converted_path)
-                        audio_path = converted_path
-                    elif file_extension == 'mp4':
-                        if status_text:
-                            status_text.text("🔄 Extracting audio from MP4...")
-                        time.sleep(0.5)
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
-                            mp3_file_path = mp3_tmp_file.name
-                        # Use ffmpeg to extract audio from MP4
-                        # This requires ffmpeg to be installed and in PATH
-                        if not ffmpeg_available:
-                            raise Exception("MP4 extraction requires FFmpeg. Please ensure it's installed and in your PATH.")
-                        cmd = f"ffmpeg -i {tmp_file_path} -vn -acodec libmp3lame -ab 192k -ar 44100 -y {mp3_file_path}"
-                        try:
-                            subprocess.run(cmd, shell=True, check=True)
-                            audio_path = mp3_file_path
-                            temp_files_to_cleanup.append(audio_path)
-                        except subprocess.CalledProcessError as e:
-                            logger.error(f"Error extracting audio from MP4: {e}")
-                            raise Exception(f"Error extracting audio from MP4: {e}")
-                        except Exception as e:
-                            logger.error(f"Error during MP4 extraction: {e}")
-                            raise e
-                
-                # Apply trimming if settings are provided
-                # Note: audio_path is already MP3 at this point (either from cache or conversion)
-                if trim_settings and (trim_settings['start_time_ms'] > 0 or trim_settings['end_time_ms'] < trim_settings['duration_ms']):
-                    if status_text:
-                        status_text.text("✂️ Trimming audio...")
+            status_box = st.status(f"Transcribiendo con {model}…", expanded=True)
+            with status_box:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                try:
+                    # Create a fresh temporary file for transcription
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+                        tmp_file.write(uploaded_file.getvalue())
+                        tmp_file_path = tmp_file.name
+                    file_extension = uploaded_file.name.split('.')[-1].lower()
+                    temp_files_to_cleanup = [tmp_file_path]
+                    # Use cached MP3 if available (to avoid re-conversion)
+                    audio_path: str = tmp_file_path  # Default
+                    use_cached_mp3 = False
+                    if file_extension == 'm4a' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
+                        if st.session_state.converted_mp3_path is not None:
+                            audio_path = st.session_state.converted_mp3_path
+                            use_cached_mp3 = True
+                    elif file_extension == 'mp4' and st.session_state.get('converted_mp3_path') and st.session_state.get('converted_mp3_file_key') == file_key:
+                        if st.session_state.converted_mp3_path is not None:
+                            audio_path = st.session_state.converted_mp3_path
+                            use_cached_mp3 = True
+
+                    # Only convert if we don't have a cached MP3
+                    if not use_cached_mp3:
+                        if file_extension == 'm4a':
+                            status_text.text("Convirtiendo M4A a MP3…")
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                                mp3_file_path = mp3_tmp_file.name
+                            converted_path = convert_m4a_to_mp3(tmp_file_path, mp3_file_path)
+                            temp_files_to_cleanup.append(converted_path)
+                            audio_path = converted_path
+                        elif file_extension == 'mp4':
+                            status_text.text("Extrayendo el audio del MP4…")
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as mp3_tmp_file:
+                                mp3_file_path = mp3_tmp_file.name
+                            # Use ffmpeg to extract audio from MP4
+                            # This requires ffmpeg to be installed and in PATH
+                            if not ffmpeg_available:
+                                raise Exception("MP4 extraction requires FFmpeg. Please ensure it's installed and in your PATH.")
+                            cmd = f"ffmpeg -i {tmp_file_path} -vn -acodec libmp3lame -ab 192k -ar 44100 -y {mp3_file_path}"
+                            try:
+                                subprocess.run(cmd, shell=True, check=True)
+                                audio_path = mp3_file_path
+                                temp_files_to_cleanup.append(audio_path)
+                            except subprocess.CalledProcessError as e:
+                                logger.error(f"Error extracting audio from MP4: {e}")
+                                raise Exception(f"Error extracting audio from MP4: {e}")
+                            except Exception as e:
+                                logger.error(f"Error during MP4 extraction: {e}")
+                                raise e
+
+                    # Apply trimming if settings are provided
+                    # Note: audio_path is already MP3 at this point (either from cache or conversion)
+                    if trim_settings and (trim_settings['start_time_ms'] > 0 or trim_settings['end_time_ms'] < trim_settings['duration_ms']):
+                        status_text.text("Recortando el audio…")
+                        if audio_path is not None:
+                            trimmed_path = trim_audio_file(
+                                audio_path,
+                                trim_settings['start_time_ms'],
+                                trim_settings['end_time_ms']
+                            )
+                            temp_files_to_cleanup.append(trimmed_path)
+                            audio_path = trimmed_path
                     if audio_path is not None:
-                        trimmed_path = trim_audio_file(
-                            audio_path,
-                            trim_settings['start_time_ms'],
-                            trim_settings['end_time_ms']
-                        )
-                        temp_files_to_cleanup.append(trimmed_path)
-                        audio_path = trimmed_path
-                if audio_path is not None:
-                    model = st.session_state.get('model', 'Deepgram')
-                    analysis = None
-                    if model == "Deepgram":
-                        # Deepgram path: core handles size/chunking, the model
-                        # fallback chain, diarization v2 and optional analysis.
-                        diarize_setting = st.session_state.get('diarize', False)
-                        sentiment_setting = st.session_state.get('sentiment', False)
-                        insights_setting = st.session_state.get('insights', True)
+                        analysis = None
+                        if model == "Deepgram":
+                            # Deepgram path: core handles size/chunking, the model
+                            # fallback chain, diarization v2 and optional analysis.
+                            diarize_setting = st.session_state.get('diarize', False)
+                            sentiment_setting = st.session_state.get('sentiment', False)
+                            insights_setting = st.session_state.get('insights', True)
 
-                        def _progress(fraction, message):
-                            if fraction is not None and progress_bar:
-                                progress_bar.progress(min(max(fraction, 0.0), 1.0))
-                            if status_text:
-                                status_text.text(message)
+                            def _progress(fraction, message):
+                                if fraction is not None and progress_bar:
+                                    progress_bar.progress(min(max(fraction, 0.0), 1.0))
+                                if status_text:
+                                    status_text.text(progress_message_es(message))
 
-                        analysis = transcribe_file_deepgram(
-                            audio_path,
-                            get_secret("DEEPGRAM_API_KEY"),
-                            language=language_code,
-                            diarize=diarize_setting,
-                            want_sentiment=sentiment_setting,
-                            want_insights=insights_setting,
-                            progress_cb=_progress,
-                        )
-                        transcription = analysis["transcript"]
+                            analysis = transcribe_file_deepgram(
+                                audio_path,
+                                get_secret("DEEPGRAM_API_KEY"),
+                                language=language_code,
+                                diarize=diarize_setting,
+                                want_sentiment=sentiment_setting,
+                                want_insights=insights_setting,
+                                progress_cb=_progress,
+                            )
+                            transcription = analysis["transcript"]
+                        else:
+                            transcription = transcribe_large_file_whisper(
+                                audio_path,
+                                language=language_code,
+                                progress_bar=progress_bar,
+                                status_text=status_text,
+                            )
                     else:
-                        transcription = transcribe_large_file_whisper(
-                            audio_path,
-                            language=language_code,
-                            progress_bar=progress_bar,
-                            status_text=status_text,
-                        )
-                else:
-                    st.error("❌ Internal error: audio_path is None.")
-                    return
-                # Clean up all temp files (but keep cached mp3 for potential reuse)
-                for temp_file in temp_files_to_cleanup:
-                    try:
-                        # Don't delete the cached mp3 if it's in the cleanup list - we want to keep it
-                        if temp_file and isinstance(temp_file, str) and os.path.exists(temp_file):
-                            # Only delete if it's not the cached mp3 we want to preserve
-                            cached_mp3 = st.session_state.get('converted_mp3_path')
-                            if temp_file != cached_mp3:
-                                os.unlink(temp_file)
-                    except Exception as e:
-                        logger.warning(f"Could not delete temp file {temp_file}: {e}")
-                # Keep converted_mp3_path and converted_mp3_file_key in session state
-                # They will be cleaned up automatically when a new file is uploaded
-                
-                progress_bar.progress(1.0)
-                status_text.text("✅ Transcription completed!")
-                st.session_state.transcription = transcription
-                st.session_state.analysis = analysis
-                st.session_state.filename = uploaded_file.name
-                #st.success("🎉 Transcription completed successfully!")
-            except Exception as e:
-                st.error(f"❌ Error during transcription: {str(e)}")
-                progress_bar.empty()
-                status_text.empty()
-    # Remove or comment out the following line to eliminate the empty frame/space:
-    # st.markdown('<div style="margin-top:0.7rem;"></div>', unsafe_allow_html=True)
-    # Show the bordered frame for transcription and controls only if there is a transcription
+                        st.error("Error interno: no hay ruta de audio que transcribir.")
+                        return
+                    # Clean up all temp files (but keep cached mp3 for potential reuse)
+                    for temp_file in temp_files_to_cleanup:
+                        try:
+                            # Don't delete the cached mp3 if it's in the cleanup list - we want to keep it
+                            if temp_file and isinstance(temp_file, str) and os.path.exists(temp_file):
+                                # Only delete if it's not the cached mp3 we want to preserve
+                                cached_mp3 = st.session_state.get('converted_mp3_path')
+                                if temp_file != cached_mp3:
+                                    os.unlink(temp_file)
+                        except Exception as e:
+                            logger.warning(f"Could not delete temp file {temp_file}: {e}")
+                    # Keep converted_mp3_path and converted_mp3_file_key in session state
+                    # They will be cleaned up automatically when a new file is uploaded
+
+                    progress_bar.progress(100)
+                    st.session_state.transcription = transcription
+                    st.session_state.analysis = analysis
+                    st.session_state.filename = uploaded_file.name
+                    status_box.update(label="Transcripción completada", state="complete", expanded=False)
+                except Exception as e:
+                    status_box.update(label="La transcripción falló", state="error", expanded=True)
+                    st.error(f"Error durante la transcripción: {str(e)}")
+    # Results (transcript + analysis tabs); persists across reruns until a new
+    # transcription replaces it.
     if 'transcription' in st.session_state:
+        render_results()
 
-        # Show transcription in a code block with copy button
-        st.code(st.session_state.transcription, language=None)
-
-        # Conversation analysis (Deepgram only). Rendered as text-labeled stat
-        # rows + native meters — identity always carried by text, never color.
-        analysis = st.session_state.get('analysis')
-        if analysis:
-            meta_bits = []
-            if analysis.get("detected_language"):
-                meta_bits.append(f"🌐 Idioma detectado: {analysis['detected_language']}")
-            if analysis.get("model_used"):
-                meta_bits.append(f"modelo: {analysis['model_used']}")
-            if meta_bits:
-                st.caption(" · ".join(meta_bits))
-            for warning in analysis.get("warnings", []):
-                st.caption(f"⚠️ {warning}")
-
-            insights = analysis.get("insights")
-            if insights:
-                with st.expander("📊 Métricas de conversación", expanded=True):
-                    for item in insights["feedback"]:
-                        st.markdown(f"- {item}")
-                    st.markdown("---")
-                    for speaker, s in sorted(insights["per_speaker"].items(), key=lambda kv: str(kv[0])):
-                        wpm_txt = f" · {s['wpm']:.0f} palabras/min" if s.get('wpm') else ""
-                        st.markdown(
-                            f"**Speaker {speaker}** — {s['talk_share'] * 100:.0f}% del habla · "
-                            f"{format_time(s['talk_time'])} · {s['words']} palabras{wpm_txt}"
-                        )
-                        st.progress(min(max(s['talk_share'], 0.0), 1.0))
-                        rating_notes = " · ".join(
-                            f"{RATING_ICONS.get(r['level'], 'ℹ️')} {r['note']}"
-                            for r in (s.get("pace_rating"), s.get("fillers_rating")) if r
-                        )
-                        if rating_notes:
-                            st.caption(rating_notes)
-                    overall = insights["overall"]
-                    st.caption(
-                        f"{overall['n_speakers']} hablante(s) · {overall['total_words']} palabras · "
-                        f"{overall['interruptions']} interrupciones · "
-                        f"{overall['silence_ratio'] * 100:.0f}% de silencio · "
-                        f"{overall['questions']} preguntas"
-                    )
-
-            sentiment = analysis.get("sentiment")
-            if sentiment:
-                with st.expander("😊 Sentimiento (Deepgram)", expanded=True):
-                    avg = sentiment["average"]
-                    label_es = {"positive": "😊 Positivo", "neutral": "😐 Neutral",
-                                "negative": "🙁 Negativo"}.get(avg["sentiment"], avg["sentiment"])
-                    st.markdown(
-                        f"**Tono general:** {label_es} ({avg['sentiment_score']:+.2f}) — "
-                        f"{describe_sentiment_score(avg['sentiment_score'])}."
-                    )
-                    st.caption(
-                        "Escala −1…+1 · Deepgram etiqueta positivo a partir de +0.33 "
-                        "y negativo por debajo de −0.33."
-                    )
-                    emoji_line = sentiment_timeline_emoji(sentiment)
-                    if emoji_line:
-                        st.markdown(f"**Evolución** (inicio → fin): {emoji_line}")
-                    for speaker, sp in sorted(sentiment["per_speaker"].items(), key=lambda kv: str(kv[0])):
-                        lab = {"positive": "positivo", "neutral": "neutral",
-                               "negative": "negativo"}.get(sp["sentiment"], sp["sentiment"])
-                        st.markdown(
-                            f"- Speaker {speaker}: {lab} ({sp['sentiment_score']:+.2f} — "
-                            f"{describe_sentiment_score(sp['sentiment_score'])})"
-                        )
-
-            if insights or sentiment:
-                with st.expander("ℹ️ Cómo leer estas métricas"):
-                    for guide_line in METRIC_GUIDE_ES:
-                        st.markdown(f"- {guide_line}")
-
-        st.markdown('<div style="height:0.5rem;"></div>', unsafe_allow_html=True)
-        # Full-width download button (better on mobile than a half-width column).
-        # st.code() already provides a built-in copy button, so no second column is needed.
-        download_data = st.session_state.transcription.encode('utf-8')
-        st.download_button(
-            label="Download",
-            data=download_data,
-            file_name=f"{st.session_state.filename.split('.')[0]}_transcript.txt",
-            mime="text/plain",
-            help="Download the transcription as a text file"
-        )
-        if analysis and (analysis.get("insights") or analysis.get("sentiment")):
-            report_data = build_report(
-                analysis, filename=st.session_state.get('filename', '')
-            ).encode('utf-8')
-            st.download_button(
-                label="📄 Descargar informe (transcript + análisis)",
-                data=report_data,
-                file_name=f"{st.session_state.filename.split('.')[0]}_report.txt",
-                mime="text/plain",
-                help="Transcripción más métricas de conversación y sentimiento en un solo archivo"
-            )
-    # If no transcription, do not show the frame, placeholder, or empty text area
-
-    # Model Selector (subtitle + select box, no bubble)
-    # st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-top:1.5rem;margin-bottom:0.5rem;">Model</div>', unsafe_allow_html=True)
-    model = st.selectbox(
-        "Transcription Model",
-        ["Deepgram", "OpenAI Whisper"],
-        key='model',
-        help="Choose the transcription service to use. OpenAI Whisper often works better for non-English content."
-    )
-
-    # Language Selector (Auto/Español/Inglés)
-    language = st.selectbox(
-        "Language",
-        ["🌐 Auto (detectar idioma)", "🇪🇸 Español", "🇬🇧 English"],
-        key='language',
-        help="Con 'Auto' el proveedor detecta el idioma solo (elige UN idioma dominante). "
-             "Fijar el idioma explícito afina algo la precisión en audios muy mezclados. "
-             "El análisis de sentimiento solo funciona con audio en inglés."
-    )
-
-    # Speaker Diarization Toggle (only for Deepgram)
-    diarize_enabled = st.checkbox(
-        "Identify different speakers (diarization)",
-        key='diarize',
-        value=True,  # Default to enabled
-        disabled=(model == "OpenAI Whisper"),
-        help="Enable speaker identification to show who said what. Only works with Deepgram model."
-    )
-
-    # Conversation analysis toggles (Deepgram only)
-    insights_enabled = st.checkbox(
-        "📊 Métricas de conversación",
-        key='insights',
-        value=True,
-        disabled=(model == "OpenAI Whisper"),
-        help="Tiempo de habla por hablante, ritmo (palabras/min), interrupciones, "
-             "monólogos y muletillas, con observaciones. Funciona en español e inglés."
-    )
-    sentiment_enabled = st.checkbox(
-        "😊 Análisis de sentimiento (solo audio en inglés)",
-        key='sentiment',
-        value=False,
-        disabled=(model == "OpenAI Whisper"),
-        help="Análisis de sentimiento de Deepgram (positivo/neutral/negativo por tramo "
-             "y por hablante). Deepgram solo lo ofrece para audio en inglés; "
-             "para español se omite con un aviso."
-    )
-
-    # Other Info (polished, centered, no bubble)
-    st.markdown('<hr style="margin:1.5rem 0 1rem 0;">', unsafe_allow_html=True)
     st.markdown(
-        '<div style="font-size:1.1rem;font-weight:600;text-align:center;">About this app</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        '<div style="font-size:1rem;line-height:1.6;text-align:center;">'
-        'Supported formats: <b>MP3, WAV, M4A, MP4</b>.<br>'
-        '<a href="https://chatgpt.com/g/g-6874e87c48608191afa2da8e3e769279-generadoractasreunion" target="_blank">Usa este GPT para generar el acta</a><br>'
-        'Created by <b>Juan Giraldo</b>.<br>'
-        'Powered by <b>Streamlit</b>, <b>Deepgram</b>, and <b>OpenAI</b>.'
-        '</div>',
-        unsafe_allow_html=True
+        '<hr style="margin:1.5rem 0 0.6rem 0;border:none;border-top:1px solid #E4E8E6;">'
+        '<div class="vt-footer">MP3 · WAV · M4A · MP4 — creado por Juan Giraldo, '
+        'con Streamlit, Deepgram y OpenAI<br>'
+        '<a href="https://chatgpt.com/g/g-6874e87c48608191afa2da8e3e769279-generadoractasreunion" '
+        'target="_blank">Genera el acta de la reunión con este GPT</a></div>',
+        unsafe_allow_html=True,
     )
 
 if __name__ == "__main__":
