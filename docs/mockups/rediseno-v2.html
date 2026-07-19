@@ -1,0 +1,582 @@
+<title>VoiceTranscriber v2 — Propuesta de rediseño</title>
+<style>
+  /* ============ tokens ============ */
+  :root {
+    --ground: #f7f9f8;
+    --surface: #ffffff;
+    --ink: #182420;
+    --ink2: #51625b;
+    --ink3: #87968f;
+    --line: #e2e8e5;
+    --accent: #0e7263;
+    --accent-tint: #e9f3f0;
+    --bad: #b3403b;
+    --bad-tint: #f8ecea;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    /* datos (validados sobre blanco, orden fijo) */
+    --sp1: #2a78d6; --sp2: #008300; --sp3: #e87ba4; --sp4: #eda100;
+    --pos: #2a78d6; --neg: #e34948; --neu: #eceeed;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      --ground: #0f1413; --surface: #171d1b;
+      --ink: #edf2f0; --ink2: #a8b6b0; --ink3: #6f7f78;
+      --line: #26302c; --accent: #35a38e; --accent-tint: #12332c;
+      --bad: #e07a73; --bad-tint: #35201e;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0f1413; --surface: #171d1b;
+    --ink: #edf2f0; --ink2: #a8b6b0; --ink3: #6f7f78;
+    --line: #26302c; --accent: #35a38e; --accent-tint: #12332c;
+    --bad: #e07a73; --bad-tint: #35201e;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --ground: #f7f9f8; --surface: #ffffff;
+    --ink: #182420; --ink2: #51625b; --ink3: #87968f;
+    --line: #e2e8e5; --accent: #0e7263; --accent-tint: #e9f3f0;
+    --bad: #b3403b; --bad-tint: #f8ecea;
+    color-scheme: light;
+  }
+
+  body { background: var(--ground); color: var(--ink); font-family: var(--serif);
+         font-size: 16.5px; line-height: 1.65; margin: 0; }
+  main, .hero-in, .foot-in { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 56px 0 8px; }
+  h1, h2, h3, h4 { font-family: var(--sans); text-wrap: balance; line-height: 1.15; }
+  h1 { font-size: clamp(30px, 4.5vw, 46px); font-weight: 750; letter-spacing: -0.015em; margin: 10px 0 14px; }
+  h2 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 4px 0 8px; }
+  h3 { font-size: 17px; font-weight: 650; margin: 0 0 6px; }
+  p  { max-width: 66ch; margin: 0 0 14px; }
+  .lede { font-size: 18.5px; color: var(--ink2); max-width: 62ch; }
+  .eyebrow { font-family: var(--sans); font-size: 11px; font-weight: 650; letter-spacing: 0.1em;
+             text-transform: uppercase; color: var(--accent); }
+  .muted { color: var(--ink2); }
+  .small { font-size: 13.5px; }
+  code, .hex { font-family: var(--mono); font-size: 0.86em; }
+  b { font-weight: 650; }
+
+  /* ============ hero ============ */
+  .hero { border-bottom: 1px solid var(--line); background: var(--surface); }
+  .hero-in { padding-top: 52px; padding-bottom: 40px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 26px 0 22px; }
+  .tile { background: var(--ground); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .tile .v { font-family: var(--sans); font-size: 27px; font-weight: 720; letter-spacing: -0.01em;
+             font-variant-numeric: tabular-nums; }
+  .tile .v small { font-size: 15px; font-weight: 600; color: var(--ink2); }
+  .tile .l { font-family: var(--sans); font-size: 12.5px; color: var(--ink2); margin-top: 2px; }
+  .strip { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+           border: 1px dashed var(--line); border-radius: 12px; padding: 12px 16px; }
+  .strip .emojis { font-size: 15px; letter-spacing: 3px; filter: saturate(0.55); opacity: 0.75; word-break: break-all; }
+  .strip .to { font-family: var(--sans); color: var(--ink3); font-size: 18px; }
+  .strip .mark { font-family: var(--sans); font-weight: 700; font-size: 14px; display: inline-flex;
+                 align-items: center; gap: 7px; background: var(--accent-tint); color: var(--accent);
+                 border-radius: 8px; padding: 6px 11px; white-space: nowrap; }
+  .wave { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+  .wave i { width: 3px; background: currentColor; border-radius: 2px; display: block; }
+  .wave i:nth-child(1) { height: 55%; } .wave i:nth-child(2) { height: 100%; } .wave i:nth-child(3) { height: 35%; }
+  .strip-cap { font-family: var(--sans); font-size: 12.5px; color: var(--ink3); margin-top: 8px; }
+
+  /* ============ diagnóstico ============ */
+  .split { display: grid; grid-template-columns: minmax(300px, 380px) 1fr; gap: 36px; align-items: start; }
+  @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
+  .problems { list-style: none; padding: 0; margin: 6px 0 0; display: grid; gap: 14px; }
+  .problems li { display: grid; grid-template-columns: 30px 1fr; gap: 12px; max-width: 60ch; }
+  .flag { font-family: var(--sans); font-size: 12px; font-weight: 700; color: var(--bad);
+          background: var(--bad-tint); border-radius: 7px; width: 30px; height: 24px;
+          display: inline-flex; align-items: center; justify-content: center; margin-top: 2px; }
+  .problems h3 { margin-bottom: 2px; }
+  .problems p { margin: 0; font-size: 15px; color: var(--ink2); }
+
+  /* ============ principios ============ */
+  .prin { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-top: 18px; }
+  .prin .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .prin p { font-size: 14.5px; color: var(--ink2); margin: 0; }
+
+  /* ============ phone frames ============ */
+  .frames { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 34px 28px; margin-top: 26px; }
+  .ph { margin: 0; }
+  .ph-scr { width: 100%; max-width: 372px; margin: 0 auto; background: #fafbfa; color: #21272a;
+            border: 1px solid var(--line); border-radius: 28px; padding: 18px 16px 20px;
+            box-shadow: 0 10px 28px rgba(15, 35, 28, 0.09); font-family: var(--sans); font-size: 13px;
+            line-height: 1.45; color-scheme: light; }
+  .ph figcaption { max-width: 372px; margin: 14px auto 0; }
+  .ph figcaption h4 { font-size: 14.5px; margin: 0 0 6px; }
+  .ph figcaption ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+  .ph figcaption li { font-family: var(--sans); font-size: 13px; color: var(--ink2);
+                      display: grid; grid-template-columns: 20px 1fr; gap: 7px; }
+  .d { font-family: var(--sans); display: inline-flex; align-items: center; justify-content: center;
+       width: 16px; height: 16px; border-radius: 50%; background: var(--accent); color: #fff;
+       font-size: 10px; font-weight: 700; vertical-align: 2px; flex: none; margin-top: 2px; }
+  .ph .d { margin: 0 0 0 6px; }
+
+  /* --- elementos comunes del mock (v2, siempre claros) --- */
+  .ab { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 14.5px;
+        color: #21272a; padding-bottom: 12px; }
+  .ab .wave { color: #0e7263; height: 13px; }
+  .m-tabs { display: flex; gap: 18px; border-bottom: 1px solid #e4e8e6; margin-bottom: 14px;
+            font-weight: 600; font-size: 13px; color: #6a7772; }
+  .m-tabs span { padding: 6px 2px 8px; }
+  .m-tabs .on { color: #0e7263; box-shadow: 0 2px 0 #0e7263; }
+  .drop { border: 1.5px dashed #c7d2cd; border-radius: 14px; padding: 26px 18px; text-align: center;
+          background: #fff; }
+  .drop b { font-size: 13.5px; }
+  .drop .sub { color: #6a7772; font-size: 12px; margin-top: 4px; }
+  .m-row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+           background: #fff; border: 1px solid #e4e8e6; border-radius: 12px; padding: 11px 13px; margin-top: 10px; }
+  .m-row .t { font-weight: 600; }
+  .m-row .s { color: #6a7772; font-size: 12px; }
+  .m-link { color: #0e7263; font-weight: 650; font-size: 12.5px; white-space: nowrap; }
+  .m-cta { margin-top: 14px; background: #0e7263; color: #fff; border-radius: 12px; text-align: center;
+           font-weight: 700; font-size: 14.5px; padding: 13px; }
+  .m-ghost { margin-top: 8px; border: 1.5px dashed #c7d2cd; color: #6a7772; border-radius: 12px;
+             text-align: center; font-weight: 650; font-size: 13px; padding: 10px; }
+  .m-foot { text-align: center; color: #9aa7a1; font-size: 11px; margin-top: 16px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; background: #f1f4f2; color: #4d5a55;
+          border-radius: 999px; padding: 2.5px 9px; font-size: 11px; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+  .badge { display: inline-block; border-radius: 6px; padding: 1.5px 7px; font-size: 10.5px; font-weight: 700; }
+  .b-good { background: #e5f3e5; color: #175617; }
+  .b-ok   { background: #fbf0d7; color: #7a4e00; }
+  .b-warn { background: #fbe7de; color: #8c3e1a; }
+  .sp { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+  .s1 { background: var(--sp1); } .s2 { background: var(--sp2); }
+  .turn { display: grid; gap: 3px; padding: 9px 0; border-bottom: 1px solid #eef1ef; }
+  .turn:last-of-type { border-bottom: 0; }
+  .turn .who { display: flex; align-items: center; gap: 6px; font-weight: 650; font-size: 12px; }
+  .turn .ts { font-family: var(--mono); color: #9aa7a1; font-size: 10.5px; font-weight: 400; margin-left: 2px; }
+  .turn p { font-size: 12.5px; margin: 0; color: #333b38; max-width: none; }
+  .stat6 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 7px; margin-top: 4px; }
+  .st { background: #fff; border: 1px solid #e4e8e6; border-radius: 10px; padding: 8px 9px; }
+  .st .v { font-size: 16px; font-weight: 720; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .st .l { font-size: 10px; color: #6a7772; margin-top: 1px; }
+  .sec-t { font-weight: 650; font-size: 12px; margin: 14px 0 7px; }
+  .tsrow { display: grid; grid-template-columns: 84px 1fr 34px; align-items: center; gap: 8px; margin: 6px 0; }
+  .tsname { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; }
+  .tsbar { background: #f1f4f2; border-radius: 5px; height: 12px; overflow: hidden; }
+  .tsbar i { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+  .tsval { font-size: 11.5px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+  .spcard { background: #fff; border: 1px solid #e4e8e6; border-radius: 10px; padding: 9px 11px; margin-top: 7px;
+            font-size: 11.5px; color: #4d5a55; }
+  .spcard .who { display: flex; align-items: center; gap: 6px; font-weight: 650; color: #21272a; font-size: 12px; margin-bottom: 3px; }
+  .obs { margin: 6px 0 0; padding-left: 16px; font-size: 11.5px; color: #4d5a55; }
+  .obs li { margin-bottom: 3px; }
+  .tl { display: flex; gap: 2px; height: 26px; align-items: stretch; margin: 8px 0 4px; }
+  .tl i { flex: 1; border-radius: 3px; }
+  .tl-x { display: flex; justify-content: space-between; font-size: 10px; color: #9aa7a1; font-family: var(--mono); }
+  .leg { display: flex; gap: 12px; font-size: 11px; color: #4d5a55; margin-top: 8px; flex-wrap: wrap; }
+  .leg span { display: inline-flex; align-items: center; gap: 5px; }
+  .tone { display: flex; align-items: baseline; gap: 8px; }
+  .tone .v { font-size: 21px; font-weight: 720; font-variant-numeric: tabular-nums; }
+  .status-card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+                 padding: 16px 18px; font-family: var(--sans); font-size: 13.5px; max-width: 372px; }
+  .status-card .head { display: flex; align-items: center; gap: 9px; font-weight: 650; margin-bottom: 9px; }
+  .spin { width: 14px; height: 14px; border: 2px solid var(--accent-tint); border-top-color: var(--accent);
+          border-radius: 50%; animation: rot 1s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  .steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 5px; color: var(--ink2); }
+  .steps .done::before { content: "✓"; color: var(--accent); font-weight: 700; margin-right: 8px; }
+  .steps .now::before  { content: "●"; color: var(--accent); margin-right: 8px; }
+  .steps .todo::before { content: "○"; color: var(--ink3); margin-right: 8px; }
+  .steps .now { color: var(--ink); font-weight: 600; }
+
+  /* --- mock v1 (el "antes") --- */
+  .v1 .ph-scr { font-size: 10.5px; line-height: 1.35; padding: 14px 13px; }
+  .v1 .h1 { text-align: center; font-size: 15px; font-weight: 700; margin: 2px 0 8px; }
+  .v1 .h1 .mic { font-size: 18px; display: block; }
+  .v1 .sect { text-align: center; font-weight: 650; font-size: 11.5px; margin: 8px 0 5px; }
+  .v1 .up { border: 1px dashed #cfd6d3; border-radius: 8px; padding: 10px; text-align: center; color: #6a7772; background: #fff; }
+  .v1 .cap { text-align: center; color: #6a7772; font-size: 10px; margin: 5px 0; }
+  .v1 .slider { height: 4px; background: #e4e8e6; border-radius: 2px; position: relative; margin: 10px 6px 8px; }
+  .v1 .slider i { position: absolute; width: 11px; height: 11px; border-radius: 50%; background: #e35c5c; top: -3.5px; }
+  .v1 .nums { display: flex; gap: 6px; }
+  .v1 .nums span { flex: 1; border: 1px solid #e4e8e6; background: #fff; border-radius: 6px; padding: 5px 7px; color: #4d5a55; }
+  .v1 .btn { background: #e35c5c; color: #fff; border-radius: 8px; text-align: center; font-weight: 650; padding: 8px; margin: 8px 0; }
+  .v1 .codebox { background: #f1f3f2; border-radius: 6px; font-family: var(--mono); font-size: 9px;
+                 color: #4d5a55; padding: 7px 8px; }
+  .v1 .exp { background: #fff; border: 1px solid #e4e8e6; border-radius: 7px; padding: 6px 8px; margin-top: 6px; }
+  .v1 .sel { display: flex; justify-content: space-between; align-items: center; background: #fff;
+             border: 1px solid #e4e8e6; border-radius: 6px; padding: 5px 8px; margin-top: 6px; color: #4d5a55; }
+  .v1 .chk { margin-top: 5px; color: #4d5a55; }
+  .v1 .about { text-align: center; color: #6a7772; font-size: 9.5px; border-top: 1px solid #e4e8e6;
+               margin-top: 8px; padding-top: 7px; }
+  .fl { font-size: 9px; font-weight: 800; font-family: var(--sans); color: #fff; background: var(--bad);
+        border-radius: 5px; padding: 1px 5px; margin-left: 5px; vertical-align: 1px; white-space: nowrap; }
+
+  /* ============ sistema visual ============ */
+  .swgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; margin-top: 14px; }
+  .swgroup { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .swgroup h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink3); }
+  .sw { display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 10px;
+        font-family: var(--sans); font-size: 13px; padding: 4.5px 0; }
+  .sw i { width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--line); }
+  .sw .hex { color: var(--ink3); }
+  .policy { width: 100%; border-collapse: collapse; font-family: var(--sans); font-size: 14px; margin-top: 12px; }
+  .policy th, .policy td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .policy th { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink3); }
+  .policy td:first-child { font-weight: 600; white-space: nowrap; }
+  .policy-wrap { overflow-x: auto; }
+
+  /* ============ plan ============ */
+  .fases { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 16px; }
+  .fase { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .fase .fk { font-family: var(--sans); font-weight: 750; font-size: 13px; color: var(--accent); }
+  .fase .fe { font-family: var(--sans); font-size: 12px; color: var(--ink3); float: right; }
+  .fase h3 { margin-top: 3px; }
+  .fase ul { margin: 8px 0 0; padding-left: 18px; font-size: 14px; color: var(--ink2); }
+  .fase li { margin-bottom: 4px; }
+  .keep { background: var(--accent-tint); border-radius: 12px; padding: 18px 22px; margin-top: 22px; }
+  .keep h3 { color: var(--accent); }
+  .keep ul { margin: 6px 0 0; padding-left: 18px; font-size: 14.5px; }
+  .keep li { margin-bottom: 5px; }
+
+  footer { border-top: 1px solid var(--line); margin-top: 56px; }
+  .foot-in { padding: 22px 24px 34px; font-family: var(--sans); font-size: 13px; color: var(--ink3); }
+</style>
+
+<header class="hero">
+  <div class="hero-in">
+    <span class="eyebrow">VoiceTranscriber · Propuesta de rediseño</span>
+    <h1>v2: menos ruido, más señal.</h1>
+    <p class="lede">La app ganó capacidades de verdad — nova‑3, diarización v2, métricas de conversación,
+    sentimiento — pero la interfaz creció por acumulación: cada función añadió un control, un emoji y un
+    texto más. La v2 no quita ninguna capacidad; las ordena. El caso feliz vuelve a ser
+    <b>subir → transcribir</b>, y el análisis nuevo pasa a presentarse como lo que es: el producto.</p>
+    <div class="tiles">
+      <div class="tile"><div class="v">50 <small>→ 0</small></div><div class="l">emojis en controles y títulos (23 distintos hoy, auditados en el código)</div></div>
+      <div class="tile"><div class="v">11 <small>→ 1</small></div><div class="l">controles a la vista antes de transcribir — el resto, plegado a un toque</div></div>
+      <div class="tile"><div class="v">2 <small>→ 1</small></div><div class="l">idiomas de interfaz: todo en español, con una sola voz</div></div>
+    </div>
+    <div class="strip">
+      <span class="emojis">🎤 📁 ☁️ 🔑 🎵 ✂️ 🌐 🇪🇸 🇬🇧 📊 😊 😐 🙁 ✅ 🟡 ⚠️ ❌ 🔄 🔍 📦 📄 🎉 ℹ️</span>
+      <span class="to">→</span>
+      <span class="mark"><span class="wave"><i></i><i></i><i></i></span>VoiceTranscriber</span>
+    </div>
+    <div class="strip-cap">La iconografía de hoy, tal cual sale de la auditoría del código, frente a la única
+    marca visual de la v2: el glifo de onda del wordmark. La semántica pasa a chips de texto con color.</div>
+  </div>
+</header>
+
+<main>
+  <!-- ================= DIAGNÓSTICO ================= -->
+  <section>
+    <span class="eyebrow">Diagnóstico</span>
+    <h2>Qué pasa hoy</h2>
+    <p>La pantalla actual, comprimida y anotada. No es una caricatura: es el orden real de los bloques
+    en <code>AppTranscribe.py</code>.</p>
+    <div class="split">
+      <figure class="ph v1">
+        <div class="ph-scr">
+          <div class="h1"><span class="mic">🎤</span>Voice Transcriber</div>
+          <div class="sect">Insert audio file <span class="fl">EN</span></div>
+          <div class="m-tabs" style="font-size:10.5px"><span class="on">📁 Subir archivo</span><span>☁️ Google Drive</span></div>
+          <div class="up">Drag and drop file here · 📄</div>
+          <div class="cap">🎵 Duration: 42:18</div>
+          <div class="sect">Audio Trimming (Optional) <span class="fl">EN</span></div>
+          <div class="slider"><i style="left:4%"></i><i style="right:2%"></i></div>
+          <div class="nums"><span>Start (s) 0.0</span><span>End (s) 2538.0</span></div>
+          <div class="cap">✂️ Will transcribe: 00:00 – 42:18 (42:18 total)</div>
+          <div class="sect">Results</div>
+          <div class="btn">🎤 Start Transcription</div>
+          <div class="codebox">Speaker 0: Buenos días a todos. Antes de entrar en el orden del día…<br>Speaker 1: Sí, lo revisé anoche. La partida de herramientas sube…<span class="fl">MONO</span></div>
+          <div class="exp">📊 Métricas de conversación ▾<br><span style="color:#6a7772">✅ ritmo conversacional ideal · 🟡 muletillas en rango normal…</span></div>
+          <div class="exp">😊 Sentimiento (Deepgram) ▾<br><span style="color:#6a7772">Evolución: 😊😊😐😐🙁😐😊…</span></div>
+          <div class="exp">ℹ️ Cómo leer estas métricas ▸</div>
+          <div class="btn" style="background:#fff;color:#4d5a55;border:1px solid #e4e8e6">Download</div>
+          <div class="btn" style="background:#fff;color:#4d5a55;border:1px solid #e4e8e6">📄 Descargar informe (transcript + análisis)</div>
+          <div class="sel">Transcription Model — Deepgram ▾ <span class="fl">¿AQUÍ?</span></div>
+          <div class="sel">Language — 🌐 Auto (detectar idioma) ▾</div>
+          <div class="chk">☑ Identify different speakers (diarization) <span class="fl">EN</span></div>
+          <div class="chk">☑ 📊 Métricas de conversación</div>
+          <div class="chk">☐ 😊 Análisis de sentimiento (solo audio en inglés)</div>
+          <div class="about">About this app · Supported formats: MP3, WAV… · Usa este GPT para generar el acta · Created by Juan Giraldo</div>
+        </div>
+        <figcaption class="small muted">La página de hoy: 11 controles apilados en una sola columna y los
+        ajustes del modelo <b>debajo</b> de los resultados que configuran.</figcaption>
+      </figure>
+      <ul class="problems">
+        <li><span class="flag">P1</span><div><h3>El orden está invertido</h3><p>Modelo, idioma y análisis se
+          eligen al final de la página, después de los resultados. Para cambiar de modelo hay que pasar de largo
+          la transcripción entera. El botón «Start Transcription» aparece antes que sus propios ajustes.</p></div></li>
+        <li><span class="flag">P2</span><div><h3>Todo compite a la vez</h3><p>Recorte, dos campos numéricos,
+          dos selectores y tres casillas están siempre desplegados, también para quien solo quiere transcribir.
+          Los buenos defaults ya existen (Deepgram + auto + diarización); la interfaz no se fía de ellos.</p></div></li>
+        <li><span class="flag">P3</span><div><h3>50 emojis hacen de sistema visual</h3><p>Micrófonos, carpetas,
+          caritas, banderas y checks sustituyen a jerarquía, color e iconografía. El estado semántico
+          (✅ 🟡 ⚠️) y hasta la línea temporal de sentimiento se comunican solo con emoji.</p></div></li>
+        <li><span class="flag">P4</span><div><h3>Dos idiomas a la vez</h3><p>«Insert audio file», «Results» y
+          «Start Transcription» conviven con «Subir archivo», «Métricas de conversación» y «Descargar informe».
+          La app no tiene una voz.</p></div></li>
+        <li><span class="flag">P5</span><div><h3>El resultado no luce lo que sabe</h3><p>La transcripción sale
+          en un bloque monoespaciado; las métricas nuevas —lo mejor de la app— quedan en listas de viñetas dentro
+          de expanders. Nada distingue visualmente a un hablante de otro.</p></div></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ================= PRINCIPIOS ================= -->
+  <section>
+    <span class="eyebrow">Principios</span>
+    <h2>Cinco reglas para la v2</h2>
+    <div class="prin">
+      <div class="card"><h3>1 · Cero decisiones en el caso feliz</h3><p>Los defaults ya son los correctos.
+        Subir y pulsar «Transcribir» sin tocar nada más es el flujo completo.</p></div>
+      <div class="card"><h3>2 · Revelación progresiva</h3><p>Recorte y ajustes existen, pero plegados y a un
+        toque, con su estado resumido en una línea. Nada desaparece; deja de gritar.</p></div>
+      <div class="card"><h3>3 · El texto manda, el color acompaña</h3><p>La semántica viaja en chips de texto;
+        el color la refuerza, nunca la sustituye. El emoji se retira de los controles.</p></div>
+      <div class="card"><h3>4 · Una sola voz, en español</h3><p>Todo el microcopy en español, directo y
+        concreto. Tecnicismos solo cuando aportan («nova‑3», «diarización»).</p></div>
+      <div class="card"><h3>5 · El resultado es el producto</h3><p>La transcripción se lee como un documento,
+        con turnos por hablante. Las métricas y el sentimiento se presentan como tarjetas, no como apéndice.</p></div>
+    </div>
+  </section>
+
+  <!-- ================= PROPUESTA ================= -->
+  <section>
+    <span class="eyebrow">Propuesta</span>
+    <h2>La v2, pantalla a pantalla</h2>
+    <p>Sigue siendo una sola página Streamlit, centrada y mobile‑first, con cuatro estados: inicio,
+    archivo listo, progreso y resultados. Los datos de los mockups son de ejemplo pero respetan las
+    estructuras reales de <code>core/transcription.py</code>.</p>
+
+    <div class="frames">
+      <!-- ---- inicio ---- -->
+      <figure class="ph">
+        <div class="ph-scr">
+          <div class="ab"><span class="wave"><i></i><i></i><i></i></span>VoiceTranscriber<span class="d">1</span></div>
+          <div class="m-tabs"><span class="on">Archivo</span><span>Google Drive</span></div>
+          <div class="drop"><b>Arrastra tu audio aquí o pulsa para elegir</b>
+            <div class="sub">MP3 · WAV · M4A · MP4 — hasta 2 GB</div></div>
+          <div class="m-row"><span class="s">Deepgram · idioma auto · diarización activada<span class="d">2</span></span>
+            <span class="m-link">Ajustes</span></div>
+          <div class="m-foot">Creado por Juan Giraldo · Deepgram + OpenAI</div>
+        </div>
+        <figcaption><h4>1 · Inicio</h4><ul>
+          <li><span class="d">1</span><span>El wordmark con glifo de onda es la única marca visual. Sin emoji de micrófono, sin cabecera gigante.</span></li>
+          <li><span class="d">2</span><span>Los ajustes se resumen en una línea y se abren en un panel plegado. Quien no los toca, no los ve desplegados.</span></li>
+        </ul></figcaption>
+      </figure>
+
+      <!-- ---- archivo listo ---- -->
+      <figure class="ph">
+        <div class="ph-scr">
+          <div class="ab"><span class="wave"><i></i><i></i><i></i></span>VoiceTranscriber</div>
+          <div class="m-row" style="margin-top:0"><div><div class="t">comite-producto-2026-07-15.mp3<span class="d">1</span></div>
+            <div class="s">42:18 · 38,4 MB</div></div><span class="m-link">Quitar</span></div>
+          <div class="m-row"><span class="s">Recortar audio — completo (00:00 – 42:18)<span class="d">2</span></span>
+            <span class="m-link">Abrir ▾</span></div>
+          <div class="m-row"><span class="s">Deepgram · idioma auto · diarización activada</span>
+            <span class="m-link">Ajustes</span></div>
+          <div class="m-cta">Transcribir<span class="d">3</span></div>
+          <div class="m-foot">La transcripción tarda ≈1 min por cada 10 de audio</div>
+        </div>
+        <figcaption><h4>2 · Archivo listo</h4><ul>
+          <li><span class="d">1</span><span>El archivo es una tarjeta con sus datos, no un caption suelto. «Quitar» evita recargar la página para cambiar de audio.</span></li>
+          <li><span class="d">2</span><span>El recorte —slider y campos numéricos actuales, intactos— vive plegado y muestra su estado en la propia fila.</span></li>
+          <li><span class="d">3</span><span>Una sola acción primaria en toda la pantalla, y los ajustes por fin <b>encima</b> del botón que los usa.</span></li>
+        </ul></figcaption>
+      </figure>
+
+      <!-- ---- resultados: transcripción ---- -->
+      <figure class="ph">
+        <div class="ph-scr">
+          <div class="ab"><span class="wave"><i></i><i></i><i></i></span>VoiceTranscriber</div>
+          <div style="font-weight:700;font-size:13.5px">comite-producto-2026-07-15</div>
+          <div class="chips"><span class="chip">Español · detectado</span><span class="chip">nova‑3</span><span class="chip">42:18</span><span class="d">1</span></div>
+          <div class="m-tabs"><span class="on">Transcripción</span><span>Métricas</span><span>Sentimiento</span></div>
+          <div class="turn"><div class="who"><span class="sp s1"></span>Hablante 1<span class="ts">00:12</span><span class="d">2</span></div>
+            <p>Buenos días a todos. Antes de entrar en el orden del día, ¿cerramos lo del presupuesto del tercer trimestre?</p></div>
+          <div class="turn"><div class="who"><span class="sp s2"></span>Hablante 2<span class="ts">00:19</span></div>
+            <p>Sí, lo revisé anoche. La partida de herramientas sube un doce por ciento, pero se compensa con el ahorro de la licencia antigua.</p></div>
+          <div class="turn"><div class="who"><span class="sp s1"></span>Hablante 1<span class="ts">00:41</span></div>
+            <p>Perfecto, lo doy por aprobado y se lo comunico a finanzas el lunes. Siguiente punto: el calendario de la demo.</p></div>
+          <div class="m-cta" style="background:#fff;color:#0e7263;border:1.5px solid #0e7263;margin-top:10px">Descargar .txt · Informe completo</div>
+          <div class="m-ghost">Generar acta — reservado Fase 1<span class="d">3</span></div>
+        </div>
+        <figcaption><h4>3 · Resultados — Transcripción</h4><ul>
+          <li><span class="d">1</span><span>Idioma detectado, modelo y duración pasan a chips discretos: metadatos, no párrafos.</span></li>
+          <li><span class="d">2</span><span>Turnos agrupados por hablante con chip de color + nombre + marca de tiempo. Tipografía de lectura, adiós al bloque monoespaciado.</span></li>
+          <li><span class="d">3</span><span>Hueco reservado para el «Generar acta» de la Fase 1 del roadmap: el rediseño ya le deja el sitio de acción estrella.</span></li>
+        </ul></figcaption>
+      </figure>
+
+      <!-- ---- resultados: métricas ---- -->
+      <figure class="ph">
+        <div class="ph-scr">
+          <div class="ab"><span class="wave"><i></i><i></i><i></i></span>VoiceTranscriber</div>
+          <div class="m-tabs"><span>Transcripción</span><span class="on">Métricas</span><span>Sentimiento</span></div>
+          <div class="stat6">
+            <div class="st"><div class="v">2</div><div class="l">hablantes<span class="d">1</span></div></div>
+            <div class="st"><div class="v">4.812</div><div class="l">palabras</div></div>
+            <div class="st"><div class="v">138</div><div class="l">palabras/min <span class="badge b-good">Bien</span></div></div>
+            <div class="st"><div class="v">7</div><div class="l">interrupciones</div></div>
+            <div class="st"><div class="v">14%</div><div class="l">silencio <span class="badge b-good">Bien</span></div></div>
+            <div class="st"><div class="v">23</div><div class="l">preguntas</div></div>
+          </div>
+          <div class="sec-t">Reparto del habla<span class="d">2</span></div>
+          <div class="tsrow"><span class="tsname"><span class="sp s1"></span>Hablante 1</span><div class="tsbar"><i class="s1" style="width:62%"></i></div><span class="tsval">62%</span></div>
+          <div class="tsrow"><span class="tsname"><span class="sp s2"></span>Hablante 2</span><div class="tsbar"><i class="s2" style="width:38%"></i></div><span class="tsval">38%</span></div>
+          <div class="spcard"><div class="who"><span class="sp s1"></span>Hablante 1</div>
+            26:12 en uso de palabra · 3.021 palabras · 142 ppm <span class="badge b-good">Bien</span> · muletillas 1,8/100 <span class="badge b-good">Bien</span></div>
+          <div class="spcard"><div class="who"><span class="sp s2"></span>Hablante 2</div>
+            16:06 en uso de palabra · 1.791 palabras · 129 ppm <span class="badge b-good">Bien</span> · muletillas 4,2/100 <span class="badge b-ok">Justo</span><span class="d">3</span></div>
+          <div class="sec-t">Observaciones</div>
+          <ul class="obs"><li>Hablante 1 concentra el 62% del habla; en una reunión equilibrada nadie supera ~60%.</li>
+            <li>Monólogo más largo: 3:12 (Hablante 1), al presentar el calendario.</li></ul>
+          <div class="m-link" style="font-size:11.5px">Cómo leer estas métricas ▸</div>
+        </div>
+        <figcaption><h4>4 · Resultados — Métricas</h4><ul>
+          <li><span class="d">1</span><span>Los totales de <code>insights.overall</code> pasan a tarjetas de cifra grande, con su valoración (Bien / Justo / Alto) como chip de texto — antes eran ✅ 🟡 ⚠️.</span></li>
+          <li><span class="d">2</span><span>El reparto del habla se ve de un vistazo: barras finas con etiqueta directa, identidad siempre en texto + color, nunca solo color.</span></li>
+          <li><span class="d">3</span><span>Ritmo y muletillas por hablante conservan las notas evaluativas de hoy, ahora como chips junto al dato.</span></li>
+        </ul></figcaption>
+      </figure>
+
+      <!-- ---- resultados: sentimiento ---- -->
+      <figure class="ph">
+        <div class="ph-scr">
+          <div class="ab"><span class="wave"><i></i><i></i><i></i></span>VoiceTranscriber</div>
+          <div class="m-tabs"><span>Transcripción</span><span>Métricas</span><span class="on">Sentimiento</span></div>
+          <div class="tone"><span class="v" style="color:#1c5cab">Positivo</span><span style="font-variant-numeric:tabular-nums;color:#6a7772">+0,41</span><span class="d">1</span></div>
+          <div style="font-size:11.5px;color:#4d5a55;margin-top:2px">Tono claramente positivo sostenido durante casi toda la conversación.</div>
+          <div class="sec-t">Evolución (inicio → fin)<span class="d">2</span></div>
+          <div class="tl">
+            <i style="background:#86b6ef"></i><i style="background:#3987e5"></i><i style="background:#2a78d6"></i>
+            <i style="background:#86b6ef"></i><i style="background:#eceeed"></i><i style="background:#eceeed"></i>
+            <i style="background:#f0a1a0"></i><i style="background:#eceeed"></i><i style="background:#86b6ef"></i>
+            <i style="background:#2a78d6"></i><i style="background:#2a78d6"></i><i style="background:#1c5cab"></i>
+          </div>
+          <div class="tl-x"><span>00:00</span><span>42:18</span></div>
+          <div class="leg"><span><span class="sp" style="background:#2a78d6"></span>Positivo</span>
+            <span><span class="sp" style="background:#eceeed;border:1px solid #dcdfdd"></span>Neutral</span>
+            <span><span class="sp" style="background:#e34948"></span>Negativo</span></div>
+          <div class="sec-t">Por hablante</div>
+          <div class="spcard"><div class="who">Hablante 1</div>Positivo · +0,52 — tono claramente positivo</div>
+          <div class="spcard"><div class="who">Hablante 2</div>Neutral · +0,18 — neutral con inclinación positiva</div>
+          <div style="font-size:10.5px;color:#9aa7a1;margin-top:9px">Deepgram solo analiza sentimiento en audio en inglés<span class="d">3</span></div>
+        </div>
+        <figcaption><h4>5 · Resultados — Sentimiento</h4><ul>
+          <li><span class="d">1</span><span>El tono general se lee en palabras y cifra; la descripción matizada de <code>describe_sentiment_score</code> se conserva tal cual.</span></li>
+          <li><span class="d">2</span><span>Los 12 tramos de la línea temporal dejan de ser 😊😐🙁 y pasan a una barra segmentada divergente (azul ↔ rojo, gris neutro), con leyenda de texto.</span></li>
+          <li><span class="d">3</span><span>Ejemplo con audio en inglés: con audio en español la pestaña no aparece; solo queda un aviso corto en Métricas.</span></li>
+        </ul></figcaption>
+      </figure>
+
+      <!-- ---- progreso ---- -->
+      <figure class="ph">
+        <div class="status-card">
+          <div class="head"><span class="spin"></span>Transcribiendo con Deepgram…</div>
+          <ul class="steps">
+            <li class="done">Audio preparado (MP3, 38,4 MB)</li>
+            <li class="done">Enviado a Deepgram (nova‑3, idioma auto)</li>
+            <li class="now">Identificando hablantes</li>
+            <li class="todo">Calculando métricas de conversación</li>
+          </ul>
+        </div>
+        <figcaption><h4>Durante la transcripción</h4><ul>
+          <li><span class="d">1</span><span>Un único bloque de estado (<code>st.status</code>) con subpasos en texto reemplaza la barra + línea de mensajes con 🔄 📦 🔍 de hoy. Los mismos eventos del <code>progress_cb</code> actual, mejor contados.</span></li>
+        </ul></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ================= SISTEMA VISUAL ================= -->
+  <section>
+    <span class="eyebrow">Sistema visual</span>
+    <h2>Tokens y política de iconografía</h2>
+    <p>Un tema propio vía <code>.streamlit/config.toml</code> (hoy no existe: la app usa el tema por defecto)
+    más un único bloque CSS. Neutros con sesgo verdoso frío para acompañar al acento petróleo; los colores de
+    datos vienen de una paleta categórica validada para daltonismo sobre fondo blanco.</p>
+    <div class="swgrid">
+      <div class="swgroup"><h3>Interfaz</h3>
+        <div class="sw"><i style="background:#fafbfa"></i>Papel<span class="hex">#FAFBFA</span></div>
+        <div class="sw"><i style="background:#f1f4f2"></i>Paneles e inputs<span class="hex">#F1F4F2</span></div>
+        <div class="sw"><i style="background:#21272a"></i>Tinta<span class="hex">#21272A</span></div>
+        <div class="sw"><i style="background:#6a7772"></i>Tinta secundaria<span class="hex">#6A7772</span></div>
+        <div class="sw"><i style="background:#0e7263"></i>Acento (acciones)<span class="hex">#0E7263</span></div>
+      </div>
+      <div class="swgroup"><h3>Hablantes (orden fijo)</h3>
+        <div class="sw"><i style="background:#2a78d6"></i>Hablante 1<span class="hex">#2A78D6</span></div>
+        <div class="sw"><i style="background:#008300"></i>Hablante 2<span class="hex">#008300</span></div>
+        <div class="sw"><i style="background:#e87ba4"></i>Hablante 3<span class="hex">#E87BA4</span></div>
+        <div class="sw"><i style="background:#eda100"></i>Hablante 4<span class="hex">#EDA100</span></div>
+      </div>
+      <div class="swgroup"><h3>Sentimiento y estados</h3>
+        <div class="sw"><i style="background:#2a78d6"></i>Positivo<span class="hex">#2A78D6</span></div>
+        <div class="sw"><i style="background:#eceeed"></i>Neutral<span class="hex">#ECEEED</span></div>
+        <div class="sw"><i style="background:#e34948"></i>Negativo<span class="hex">#E34948</span></div>
+        <div class="sw"><i style="background:#e5f3e5"></i>Chip «Bien»<span class="hex">#175617/#E5F3E5</span></div>
+        <div class="sw"><i style="background:#fbf0d7"></i>Chip «Justo»<span class="hex">#7A4E00/#FBF0D7</span></div>
+      </div>
+    </div>
+    <p class="small muted" style="margin-top:14px">Identidad siempre en texto: cada color de hablante va pegado
+    a su etiqueta «Hablante N», cada tramo de sentimiento tiene leyenda, cada chip lleva palabra. Más de 4
+    hablantes: se repite la paleta con etiqueta siempre visible. Tipografía: la sans del sistema que ya usa
+    Streamlit, con jerarquía por tamaño y peso; monoespaciada solo para marcas de tiempo.</p>
+    <div class="policy-wrap"><table class="policy">
+      <tr><th>Dónde</th><th>Política de emoji e iconos</th></tr>
+      <tr><td>Controles, títulos, pestañas</td><td>Cero emojis. Jerarquía tipográfica y, si hace falta icono, el glifo de onda del wordmark.</td></tr>
+      <tr><td>Estados y valoraciones</td><td>Chips de texto con color («Bien», «Justo», «Alto»; «Positivo», «Negativo»). El emoji ✅ 🟡 ⚠️ desaparece de la pantalla.</td></tr>
+      <tr><td>Errores y avisos</td><td>Texto directo de <code>st.error</code>/<code>st.warning</code>, sin ❌ ni ⚠️ añadidos: el componente ya aporta el color.</td></tr>
+      <tr><td>Informe .txt descargable</td><td>Se mantienen ✅ 🟡 ⚠️ y la línea de emojis de sentimiento: en texto plano no hay color, ahí el emoji sí trabaja (<code>build_report</code> no cambia).</td></tr>
+    </table></div>
+  </section>
+
+  <!-- ================= PLAN ================= -->
+  <section>
+    <span class="eyebrow">Plan de implementación</span>
+    <h2>Cuatro fases, cada una entregable sola</h2>
+    <p>Ordenadas para que la primera ya se sienta como la v2. Solo se toca <code>AppTranscribe.py</code>,
+    un <code>config.toml</code> nuevo y <code>requirements.txt</code> (fijar la versión mínima de Streamlit);
+    <code>core/transcription.py</code> no cambia — como mucho se le añade algún dato ya calculado que la UI
+    aún no muestra.</p>
+    <div class="fases">
+      <div class="fase"><span class="fk">FASE A</span><span class="fe">~½ día</span>
+        <h3>Base serena</h3>
+        <ul><li>Crear <code>.streamlit/config.toml</code> con el tema (acento, papel, radios).</li>
+          <li>Quitar los emojis de todos los controles y unificar el microcopy en español.</li>
+          <li>Mover modelo, idioma y análisis <b>encima</b> del botón, como panel «Ajustes» plegado.</li>
+          <li>Un único bloque CSS en lugar de los tres actuales.</li></ul></div>
+      <div class="fase"><span class="fk">FASE B</span><span class="fe">~1 día</span>
+        <h3>Flujo por estados</h3>
+        <ul><li>Tarjeta de archivo con «Quitar»; recorte en expander plegado con estado resumido.</li>
+          <li>Progreso con <code>st.status</code> y subpasos de texto (mismo <code>progress_cb</code>).</li>
+          <li>Chips de metadatos (idioma detectado, modelo, duración) en el resultado.</li></ul></div>
+      <div class="fase"><span class="fk">FASE C</span><span class="fe">1–2 días</span>
+        <h3>Resultados que lucen</h3>
+        <ul><li>Pestañas Transcripción / Métricas / Sentimiento.</li>
+          <li>Turnos por hablante desde <code>utterances</code> (con texto plano como respaldo sin diarización).</li>
+          <li>Tarjetas de cifra, barras de reparto, chips de valoración, línea temporal divergente.</li>
+          <li>Acciones de descarga agrupadas + hueco «Generar acta» (Fase 1 del roadmap).</li></ul></div>
+      <div class="fase"><span class="fk">FASE D</span><span class="fe">continuo</span>
+        <h3>Pulido</h3>
+        <ul><li>QA en móvil real (el tap-target de 44 px se conserva de hoy).</li>
+          <li>Contraste AA, estados de foco, revisión del microcopy.</li>
+          <li>Estados vacíos y de error con el mismo tono.</li></ul></div>
+    </div>
+    <div class="keep">
+      <h3>Qué no se toca (invariantes de ingeniería)</h3>
+      <ul>
+        <li>Los valores internos <code>"Deepgram"</code> / <code>"OpenAI Whisper"</code> del selector: si la etiqueta visible cambia, se mapea etiqueta→valor, nunca al revés.</li>
+        <li>Las claves y callbacks de sincronía del recorte (<code>trim_range_slider</code>, <code>trim_start_input</code>, <code>trim_end_input</code>): solo cambian de sitio, no de mecánica.</li>
+        <li>La caché de conversión M4A/MP4 (<code>converted_mp3_path</code> / <code>converted_mp3_file_key</code>) y el <code>file_key</code> por nombre+tamaño+tipo.</li>
+        <li>El flujo OAuth de Drive (callback al principio de <code>main()</code>, PKCE en disco) y el duck-typing de <code>DriveFile</code>.</li>
+        <li><code>layout="centered"</code> y el enfoque mobile-first; <code>get_secret</code> para toda clave.</li>
+        <li>El formato del informe .txt (<code>build_report</code>) — es contrato compartido con el CLI.</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="foot-in">Propuesta de rediseño v2 · rama <code>claude/app-visual-ux-redesign-xfbmar</code> ·
+  plan detallado en <code>docs/rediseno-ux-v2.md</code> · mockup estático, datos de ejemplo ·
+  los frames de la app se muestran en su tema claro a propósito.</div>
+</footer>
