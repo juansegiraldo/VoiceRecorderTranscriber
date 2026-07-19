@@ -47,6 +47,38 @@ def get_secret(key, default=None):
     return os.environ.get(key, default)
 
 
+# Server-side safety net for finished transcripts. Mobile browsers suspend
+# background tabs, which drops the Streamlit session and discards
+# st.session_state — losing the result of a long transcription right as it
+# finishes. Persisting to the container's temp dir lets a fresh session
+# (page refresh) recover the last completed transcript.
+_LAST_TRANSCRIPT_PATH = os.path.join(tempfile.gettempdir(), "vt_last_transcript.json")
+
+
+def _save_last_transcript(filename: str, transcription: str) -> None:
+    try:
+        with open(_LAST_TRANSCRIPT_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "filename": filename,
+                "transcription": transcription,
+                "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }, f)
+    except Exception as e:
+        logger.warning(f"Could not persist last transcript: {e}")
+
+
+def _load_last_transcript() -> dict | None:
+    try:
+        if os.path.exists(_LAST_TRANSCRIPT_PATH):
+            with open(_LAST_TRANSCRIPT_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("transcription"):
+                return data
+    except Exception as e:
+        logger.warning(f"Could not load last transcript: {e}")
+    return None
+
+
 # Check for FFmpeg availability
 def check_ffmpeg():
     """Check if FFmpeg is available for audio processing."""
@@ -1620,13 +1652,17 @@ def main():
                     model = st.session_state.get('model', 'Deepgram')
                     diarize_setting = st.session_state.get('diarize', False)
                     transcription = transcribe_large_file(
-                        audio_path, 
+                        audio_path,
                         model,
                         language=language_code,
                         diarize=diarize_setting,
-                        progress_bar=progress_bar, 
+                        progress_bar=progress_bar,
                         status_text=status_text,
                     )
+                    # Persist immediately, before any further Streamlit calls:
+                    # if the browser session died mid-run, the next UI call may
+                    # abort this script and the result would be lost.
+                    _save_last_transcript(uploaded_file.name, transcription)
                 else:
                     st.error("❌ Internal error: audio_path is None.")
                     return
@@ -1672,7 +1708,21 @@ def main():
             mime="text/plain",
             help="Download the transcription as a text file"
         )
-    # If no transcription, do not show the frame, placeholder, or empty text area
+    else:
+        # No transcript in this session — offer the last one persisted
+        # server-side (recovers results lost to a dropped mobile session).
+        last = _load_last_transcript()
+        if last:
+            with st.expander(f"📄 Recuperar última transcripción — {last['filename']} ({last.get('saved_at', '')})"):
+                st.code(last["transcription"], language=None)
+                st.download_button(
+                    label="Download",
+                    data=last["transcription"].encode("utf-8"),
+                    file_name=f"{last['filename'].split('.')[0]}_transcript.txt",
+                    mime="text/plain",
+                    key="download_recovered_transcript",
+                    help="Download the recovered transcription as a text file"
+                )
 
     # Model Selector (subtitle + select box, no bubble)
     # st.markdown('<div style="font-size:1.1rem;font-weight:600;margin-top:1.5rem;margin-bottom:0.5rem;">Model</div>', unsafe_allow_html=True)
