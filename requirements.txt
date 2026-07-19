@@ -1,4 +1,6 @@
-streamlit>=1.28.0
+# >=1.40: the v2 UI uses st.segmented_control (1.40) plus st.status/st.toggle/
+# st.container(height=) from earlier releases. Streamlit Cloud installs latest.
+streamlit>=1.40.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 pydub>=0.25.1

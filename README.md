@@ -9,7 +9,7 @@ A powerful audio transcription application built with Streamlit that supports mu
 - **Speaker Diarization**: `[Speaker N]:` labels via Deepgram's batch diarizer v2, with speaker IDs kept consistent across chunks
 - **Conversation Insights**: per-speaker talk share, pace (words/min), interruptions, monologues, filler words (muletillas) + feedback bullets
 - **Sentiment Analysis**: Deepgram sentiment (English audio only) — overall, per speaker, and a timeline
-- **Web Interface**: Mobile-first Streamlit UI with trimming and Google Drive input
+- **Web Interface**: Mobile-first, Spanish-first Streamlit UI (v2 redesign: single Audio → Ajustes → Resultado flow, results in tabs — see [docs/rediseno-ux-v2.md](docs/rediseno-ux-v2.md)) with trimming and Google Drive input
 - **Large File Support**: Deepgram accepts big files directly (chunking only >150MB, with silence-aware cuts); Whisper chunks at 24MB
 - **Progress Tracking**: Real-time progress updates during transcription
 
@@ -40,7 +40,7 @@ VoiceTranscriber/
 ## 🛠️ Setup
 
 ### Prerequisites
-- Python 3.8 or higher
+- Python 3.9 or higher (Streamlit >=1.40)
 - FFmpeg (for audio processing)
 
 ### Installation
@@ -150,10 +150,10 @@ python -m unittest discover tests
 
 ### Web Application
 1. Open the app in your browser
-2. Select your preferred transcription model
-3. Upload an audio file (MP3, WAV, or M4A)
-4. Click "Start Transcription"
-5. Download the results
+2. Upload an audio file (or load one from Google Drive)
+3. Optionally adjust the language, trim range, or the model/analysis toggles under "Opciones avanzadas"
+4. Click "Transcribir"
+5. Read the result in the Transcripción / Métricas / Sentimiento tabs and download the .txt or the full report
 
 ### M4A Conversion
 1. Place M4A files in `m4a_input/` folder

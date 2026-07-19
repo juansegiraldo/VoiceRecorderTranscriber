@@ -1,0 +1,12 @@
+# Voice Transcriber v2 theme — tokens documented in docs/rediseno-ux-v2.md.
+# Accent: deep petrol green (calm, audio-world, 5.3:1 on white — AA). Neutrals
+# carry a slight bias toward the accent hue (chosen, not inherited). Custom CSS
+# in AppTranscribe.py reads these via Streamlit's CSS variables with fallbacks,
+# so switching to the dark base theme from the app menu still works.
+
+[theme]
+base = "light"
+primaryColor = "#0F766E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F6F5"
+textColor = "#1F2A2E"
