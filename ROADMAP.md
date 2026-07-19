@@ -52,14 +52,20 @@ meta final; es un peldaño.
 
 ## 3. Fases
 
-### Fase 0 — Limpieza de base (días)
+### Fase 0 — Limpieza de base (días) ✅ hecha (2026-07)
 Prepara el terreno sin cambiar funcionalidad.
-- [ ] Extraer la lógica de transcripción/diarización a un módulo reutilizable
-      (`core/transcription.py`) — hoy está **duplicada** entre `AppTranscribe.py` y
-      `scripts/deepgram_transcribe_cli.py`. Esto es prerequisito para reusarla en una
-      extensión o app de escritorio sin copiar-pegar otra vez.
-- [ ] Tests mínimos sobre `map_speakers_between_chunks` y `format_diarized_output`
-      (no hay tests hoy; estas funciones son el activo a proteger).
+- [x] Extraer la lógica de transcripción/diarización a un módulo reutilizable
+      (`core/transcription.py`) — antes estaba **duplicada** entre `AppTranscribe.py` y
+      `scripts/deepgram_transcribe_cli.py`; ahora ambos importan el core. De paso se
+      modernizó la petición a Deepgram (nova-3 con fallback, `diarize_model=latest` v2,
+      timeouts y reintentos) y el remapeo de speakers entre chunks es inyectivo
+      (talk-time + continuidad de frontera) con corte en silencios.
+- [x] Tests mínimos sobre `map_speakers_between_chunks` y `format_diarized_output`
+      (`tests/test_transcription.py`, `python -m unittest discover tests`; cubren también
+      fallback HTTP, sentimiento e insights).
+- Extra entregado: análisis de conversación (talk share, ritmo, muletillas,
+  interrupciones, monólogos) y sentimiento Deepgram (solo inglés) en app y CLI —
+  primer paso hacia el "feedback de reunión" de la Fase 1.
 
 ### Fase 1 — Acta con IA + plantillas (1-2 semanas) ⭐ mayor valor/esfuerzo
 Mueve el producto de "transcriptor" a "tomador de notas" **sin tocar la captura**.

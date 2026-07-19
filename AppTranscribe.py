@@ -7,7 +7,6 @@ from pathlib import Path
 import tempfile
 import json
 import shutil
-import math
 import time
 import io
 import logging
@@ -23,6 +22,17 @@ AudioSegment.converter = ffmpeg_path
 AudioSegment.ffmpeg = ffmpeg_path
 print(f"Patched AudioSegment.converter to: {AudioSegment.converter}")
 print(f"Patched AudioSegment.ffmpeg to: {AudioSegment.ffmpeg}")
+
+# Shared transcription/diarization/analysis core (ROADMAP Phase 0 extraction —
+# the same module backs scripts/deepgram_transcribe_cli.py). Imported after the
+# FFmpeg patch on principle; core only lazy-imports pydub when splitting.
+from core.transcription import (
+    WHISPER_MAX_CHUNK_MB,
+    build_report,
+    sentiment_timeline_emoji,
+    split_audio_file,
+    transcribe_file_deepgram,
+)
 
 # Set up logging for conversion
 logging.basicConfig(level=logging.INFO)
@@ -160,30 +170,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def split_audio_file(file_path: str, max_size_mb: int = 24) -> list[str]:
-    """Split a large audio file into smaller chunks that fit within API limits."""
-    max_size_bytes = max_size_mb * 1024 * 1024
-    audio = AudioSegment.from_file(file_path)
-    file_size = os.path.getsize(file_path)
-    if file_size <= max_size_bytes:
-        return [file_path]
-    num_chunks = math.ceil(file_size / max_size_bytes)
-    chunk_duration = len(audio) // num_chunks
-    temp_dir = tempfile.mkdtemp()
-    chunk_paths = []
-    try:
-        for i in range(num_chunks):
-            start_time = i * chunk_duration
-            end_time = start_time + chunk_duration if i < num_chunks - 1 else len(audio)
-            chunk = audio[start_time:end_time]
-            chunk_path = os.path.join(temp_dir, f"chunk_{i:03d}.mp3")
-            chunk.export(chunk_path, format="mp3")
-            chunk_paths.append(chunk_path)
-        return chunk_paths
-    except Exception as e:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise e
-
 def transcribe_with_openai(path: str, language: str = None) -> str:
     api_key = get_secret("OPENAI_API_KEY")
     if not api_key:
@@ -200,369 +186,23 @@ def transcribe_with_openai(path: str, language: str = None) -> str:
     return transcript.text
 
 
-def format_diarized_output(deepgram_response: dict, speaker_mapping: dict | None = None) -> str:
+def transcribe_large_file_whisper(file_path: str, language: str = None, progress_bar=None, status_text=None) -> str:
+    """OpenAI Whisper path: chunk to fit the 25 MB API limit and concatenate.
+
+    The Deepgram path does NOT go through here — core.transcription handles
+    size (much higher limit) and diarization/speaker consistency itself.
     """
-    Format Deepgram response with utterances into a speaker-labeled transcript.
-    Groups consecutive utterances from the same speaker together for better readability.
-    
-    Args:
-        deepgram_response: Deepgram API JSON response with utterances
-        speaker_mapping: Optional dict to remap speaker IDs (current_id -> new_id)
-        
-    Returns:
-        Formatted string with speaker labels like "[Speaker 0]: text"
-    """
-    utterances = deepgram_response.get("results", {}).get("utterances", [])
-    if not utterances:
-        # Fallback to regular transcript if no utterances
-        transcript = deepgram_response.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-        return transcript if transcript else ""
-    
-    formatted_lines = []
-    current_speaker = None
-    current_text_parts = []
-    
-    for utterance in utterances:
-        speaker = utterance.get("speaker", 0)
-        # Apply speaker mapping if provided
-        if speaker_mapping and speaker in speaker_mapping:
-            speaker = speaker_mapping[speaker]
-        
-        transcript = utterance.get("transcript", "").strip()
-        
-        if not transcript:
-            continue
-        
-        # If same speaker, combine with previous text
-        if speaker == current_speaker:
-            current_text_parts.append(transcript)
-        else:
-            # New speaker - save previous speaker's combined text
-            if current_speaker is not None and current_text_parts:
-                combined_text = " ".join(current_text_parts)
-                formatted_lines.append(f"[Speaker {current_speaker}]: {combined_text}")
-            
-            # Start new speaker
-            current_speaker = speaker
-            current_text_parts = [transcript]
-    
-    # Don't forget the last speaker
-    if current_speaker is not None and current_text_parts:
-        combined_text = " ".join(current_text_parts)
-        formatted_lines.append(f"[Speaker {current_speaker}]: {combined_text}")
-    
-    return "\n".join(formatted_lines)
-
-
-def extract_speakers_from_response(deepgram_response: dict) -> tuple[list[dict], dict]:
-    """
-    Extract utterances and speaker information from Deepgram response.
-    
-    Args:
-        deepgram_response: Deepgram API JSON response with utterances
-        
-    Returns:
-        tuple: (list of utterances with speaker info, speaker_stats dict)
-    """
-    utterances = deepgram_response.get("results", {}).get("utterances", [])
-    if not utterances:
-        return [], {}
-    
-    # Count speaker occurrences
-    speaker_stats = {}
-    for utterance in utterances:
-        speaker = utterance.get("speaker", 0)
-        speaker_stats[speaker] = speaker_stats.get(speaker, 0) + 1
-    
-    return utterances, speaker_stats
-
-
-def map_speakers_between_chunks(prev_speakers: dict, current_speakers: dict, 
-                                 prev_last_speaker: int | None = None) -> dict:
-    """
-    Map speakers from current chunk to previous chunk speakers.
-    
-    Args:
-        prev_speakers: Speaker stats from previous chunk {speaker_id: count}
-        current_speakers: Speaker stats from current chunk {speaker_id: count}
-        prev_last_speaker: Last speaker ID from previous chunk
-        
-    Returns:
-        dict: Mapping from current speaker ID to previous speaker ID
-    """
-    if not prev_speakers or not current_speakers:
-        return {}
-    
-    mapping = {}
-    
-    # Strategy 1: If there's a clear last speaker from previous chunk,
-    # try to match it with the first speaker of current chunk
-    if prev_last_speaker is not None:
-        # Find the most common speaker in current chunk (likely the first one)
-        most_common_current = max(current_speakers.items(), key=lambda x: x[1])[0]
-        # If previous chunk ended with a speaker, try to match it
-        if prev_last_speaker in prev_speakers:
-            mapping[most_common_current] = prev_last_speaker
-    
-    # Strategy 2: Map speakers by frequency/order
-    # Sort speakers by frequency (most common first)
-    prev_sorted = sorted(prev_speakers.items(), key=lambda x: x[1], reverse=True)
-    current_sorted = sorted(current_speakers.items(), key=lambda x: x[1], reverse=True)
-    
-    # Map by order (most common to most common)
-    for i, (current_speaker, _) in enumerate(current_sorted):
-        if current_speaker not in mapping:  # Don't override existing mapping
-            if i < len(prev_sorted):
-                # Map to corresponding speaker from previous chunk
-                mapping[current_speaker] = prev_sorted[i][0]
-            else:
-                # New speaker not seen before - assign new ID
-                max_prev_speaker = max(prev_speakers.keys()) if prev_speakers else -1
-                mapping[current_speaker] = max_prev_speaker + 1
-    
-    return mapping
-
-
-def transcribe_with_deepgram(path: str, language: str = None, diarize: bool = False, return_raw: bool = False) -> str | dict:
-    """
-    Transcribe audio using Deepgram API.
-    
-    Args:
-        path: Path to audio file
-        language: Language code ('es' or 'en')
-        diarize: Whether to enable speaker diarization
-        return_raw: If True, return raw response dict instead of formatted string
-        
-    Returns:
-        Formatted transcript string or raw response dict if return_raw=True
-    """
-    api_key = get_secret("DEEPGRAM_API_KEY")
-    if not api_key:
-        raise EnvironmentError("DEEPGRAM_API_KEY environment variable not set")
-    # Determinar el código de idioma para Deepgram
-    lang_code = "es" if language == "es" else "en"
-    
-    # Build URL parameters
-    base_params = "smart_format=true&punctuate=true"
-    if diarize:
-        base_params += "&diarize=true&utterances=true"
-    else:
-        base_params += "&diarize=false"
-    
-    url_default = f"https://api.deepgram.com/v1/listen?{base_params}&language={lang_code}&model=base"
-    headers = {
-        "Authorization": f"Token {api_key}",
-        "Content-Type": "audio/mp3",
-        "Accept": "application/json",
-    }
-    with open(path, "rb") as f:
-        audio_data = f.read()
-    response = requests.post(url_default, headers=headers, data=audio_data)
-    if not response.ok:
-        print(f"Deepgram error response ({lang_code} model):", response.text)
-        if return_raw:
-            return {"error": response.text}
-        return f"Deepgram error ({lang_code} model): {response.text}"
-    dg = response.json()
-    print(f"Deepgram raw response ({lang_code} model):", dg)
-    
-    # If return_raw is requested, return the raw response
-    if return_raw:
-        return dg
-    
-    # Handle diarized response
-    if diarize:
-        formatted = format_diarized_output(dg)
-        if formatted and len(formatted.strip()) > 10:
-            return formatted
-    else:
-        transcript = dg.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-        if transcript and len(transcript.strip()) > 10:
-            return transcript
-    
-    # Si no hay buen resultado, intentar autodetección
-    url_auto = f"https://api.deepgram.com/v1/listen?{base_params}&detect_language=true"
-    response2 = requests.post(url_auto, headers=headers, data=audio_data)
-    if not response2.ok:
-        print("Deepgram error response (auto-detect):", response2.text)
-        if return_raw:
-            return {"error": response2.text}
-        return f"Deepgram error (auto-detect): {response2.text}"
-    dg2 = response2.json()
-    print("Deepgram raw response (auto-detect):", dg2)
-    
-    # Handle diarized response
-    if diarize:
-        formatted2 = format_diarized_output(dg2)
-        if formatted2 and len(formatted2.strip()) > 10:
-            return formatted2
-    else:
-        transcript2 = dg2.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-        if transcript2 and len(transcript2.strip()) > 10:
-            return transcript2
-    
-    # Si todo falla, intentar modelo original
-    url_original = f"https://api.deepgram.com/v1/listen?{base_params}"
-    response3 = requests.post(url_original, headers=headers, data=audio_data)
-    if not response3.ok:
-        print("Deepgram error response (original):", response3.text)
-        if return_raw:
-            return {"error": response3.text}
-        return f"Deepgram error (original): {response3.text}"
-    dg3 = response3.json()
-    print("Deepgram raw response (original):", dg3)
-    
-    # Handle diarized response
-    if diarize:
-        formatted3 = format_diarized_output(dg3)
-        if formatted3:
-            return formatted3
-    else:
-        transcript3 = dg3.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
-        if transcript3:
-            return transcript3
-    
-    if return_raw:
-        return {"error": "All attempts failed"}
-    return f"Deepgram failed to transcribe properly. Responses:\n{lang_code}: {dg}\nAuto-detect: {dg2}\nOriginal: {dg3}"
-
-
-def transcribe_file(path: str, model: str, language: str = None, diarize: bool = False) -> str:
-    if model == "OpenAI Whisper":
-        return transcribe_with_openai(path, language)
-    elif model == "Deepgram":
-        return transcribe_with_deepgram(path, language, diarize)
-    else:
-        raise ValueError(f"Unknown model: {model}")
-
-
-def transcribe_large_file_with_diarization(chunk_paths: list[str], language: str = None, progress_bar=None, status_text=None) -> str:
-    """
-    Transcribe large file with speaker diarization, maintaining speaker consistency across chunks.
-    
-    Args:
-        chunk_paths: List of chunk file paths
-        language: Language code ('es' or 'en')
-        progress_bar: Streamlit progress bar
-        status_text: Streamlit status text element
-        
-    Returns:
-        Combined transcription with consistent speaker IDs across chunks
-    """
-    transcriptions = []
-    temp_dir = os.path.dirname(chunk_paths[0]) if len(chunk_paths) > 1 else None
-    
-    # Track speakers across chunks
-    global_speaker_mapping = {}  # Maps (chunk_idx, local_speaker) -> global_speaker
-    prev_speakers = {}
-    prev_last_speaker = None
-    next_global_speaker_id = 0
-    
-    try:
-        for chunk_idx, chunk_path in enumerate(chunk_paths):
-            chunk_num = chunk_idx + 1
-            if status_text:
-                status_text.text(f"🎤 Processing chunk {chunk_num}/{len(chunk_paths)}...")
-            if progress_bar:
-                progress_bar.progress(chunk_num / len(chunk_paths))
-            
-            try:
-                # Get raw response for this chunk
-                raw_response = transcribe_with_deepgram(chunk_path, language, diarize=True, return_raw=True)
-                
-                if isinstance(raw_response, dict) and "error" in raw_response:
-                    transcriptions.append(f"[Error in chunk {chunk_num}: {raw_response['error']}]")
-                    continue
-                
-                # Extract speaker information
-                utterances, current_speakers = extract_speakers_from_response(raw_response)
-                
-                if not utterances:
-                    # Fallback to regular transcription
-                    chunk_transcription = transcribe_with_deepgram(chunk_path, language, diarize=False)
-                    transcriptions.append(chunk_transcription)
-                    continue
-                
-                # Map speakers to maintain consistency
-                speaker_mapping = {}
-                if chunk_idx > 0 and prev_speakers:
-                    # Map current chunk speakers to previous chunk speakers
-                    local_mapping = map_speakers_between_chunks(
-                        prev_speakers, 
-                        current_speakers, 
-                        prev_last_speaker
-                    )
-                    
-                    # Convert local mapping to global speaker IDs
-                    for local_speaker, mapped_speaker in local_mapping.items():
-                        # Find the global ID for the mapped speaker from previous chunk
-                        prev_global_id = None
-                        for (prev_chunk_idx, prev_local_speaker), global_id in global_speaker_mapping.items():
-                            if prev_chunk_idx == chunk_idx - 1 and prev_local_speaker == mapped_speaker:
-                                prev_global_id = global_id
-                                break
-                        
-                        if prev_global_id is not None:
-                            speaker_mapping[local_speaker] = prev_global_id
-                        else:
-                            # New speaker
-                            speaker_mapping[local_speaker] = next_global_speaker_id
-                            next_global_speaker_id += 1
-                else:
-                    # First chunk - assign global IDs sequentially
-                    for local_speaker in current_speakers.keys():
-                        speaker_mapping[local_speaker] = next_global_speaker_id
-                        next_global_speaker_id += 1
-                
-                # Store mapping for future chunks
-                for local_speaker, global_speaker in speaker_mapping.items():
-                    global_speaker_mapping[(chunk_idx, local_speaker)] = global_speaker
-                
-                # Format with mapped speakers
-                chunk_transcription = format_diarized_output(raw_response, speaker_mapping)
-                transcriptions.append(chunk_transcription)
-                
-                # Update tracking for next chunk
-                prev_speakers = current_speakers
-                if utterances:
-                    # Keep the local speaker ID (not global) for mapping in next chunk
-                    prev_last_speaker = utterances[-1].get("speaker", 0)
-                
-                if status_text:
-                    status_text.text(f"✅ Chunk {chunk_num} processed")
-                    
-            except Exception as e:
-                if status_text:
-                    status_text.text(f"❌ Error processing chunk {chunk_num}: {str(e)}")
-                transcriptions.append(f"[Error in chunk {chunk_num}: {str(e)}]")
-    
-    finally:
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-    
-    # Join transcriptions with spacing
-    combined_transcription = "\n\n".join(transcriptions)
-    return combined_transcription
-
-
-def transcribe_large_file(file_path: str, model: str, language: str = None, diarize: bool = False, progress_bar=None, status_text=None) -> str:
     if status_text:
         status_text.text("🔍 Analyzing file...")
-    chunk_paths = split_audio_file(file_path)
+    chunk_paths = split_audio_file(file_path, max_size_mb=WHISPER_MAX_CHUNK_MB)
     if len(chunk_paths) == 1:
         if status_text:
             status_text.text("🎤 Transcribing file...")
-        return transcribe_file(file_path, model, language, diarize)
+        return transcribe_with_openai(file_path, language)
     if status_text:
         status_text.text(f"📦 File split into {len(chunk_paths)} chunks")
-    
-    # Special handling for diarized multi-chunk files
-    if diarize and model == "Deepgram":
-        return transcribe_large_file_with_diarization(chunk_paths, language, progress_bar, status_text)
-    
-    # Regular processing for non-diarized or non-Deepgram
     transcriptions = []
-    temp_dir = os.path.dirname(chunk_paths[0]) if len(chunk_paths) > 1 else None
+    temp_dir = os.path.dirname(chunk_paths[0])
     try:
         for i, chunk_path in enumerate(chunk_paths, 1):
             if status_text:
@@ -570,8 +210,7 @@ def transcribe_large_file(file_path: str, model: str, language: str = None, diar
             if progress_bar:
                 progress_bar.progress(i / len(chunk_paths))
             try:
-                chunk_transcription = transcribe_file(chunk_path, model, language, diarize)
-                transcriptions.append(chunk_transcription)
+                transcriptions.append(transcribe_with_openai(chunk_path, language))
                 if status_text:
                     status_text.text(f"✅ Chunk {i} processed")
             except Exception as e:
@@ -581,12 +220,8 @@ def transcribe_large_file(file_path: str, model: str, language: str = None, diar
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-    # Join transcriptions - use newlines for diarized output to preserve speaker labels
-    if diarize:
-        combined_transcription = "\n\n".join(transcriptions)
-    else:
-        combined_transcription = " ".join(transcriptions)
-    return combined_transcription
+    return " ".join(transcriptions)
+
 
 def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate: str = "192k") -> str:
     """
@@ -1304,17 +939,38 @@ def main():
                         temp_files_to_cleanup.append(trimmed_path)
                         audio_path = trimmed_path
                 if audio_path is not None:
-                    # Get diarize setting (only use if Deepgram is selected)
                     model = st.session_state.get('model', 'Deepgram')
-                    diarize_setting = st.session_state.get('diarize', False) if model == "Deepgram" else False
-                    transcription = transcribe_large_file(
-                        audio_path, 
-                        model,
-                        language=language_code,
-                        diarize=diarize_setting,
-                        progress_bar=progress_bar, 
-                        status_text=status_text,
-                    )
+                    analysis = None
+                    if model == "Deepgram":
+                        # Deepgram path: core handles size/chunking, the model
+                        # fallback chain, diarization v2 and optional analysis.
+                        diarize_setting = st.session_state.get('diarize', False)
+                        sentiment_setting = st.session_state.get('sentiment', False)
+                        insights_setting = st.session_state.get('insights', True)
+
+                        def _progress(fraction, message):
+                            if fraction is not None and progress_bar:
+                                progress_bar.progress(min(max(fraction, 0.0), 1.0))
+                            if status_text:
+                                status_text.text(message)
+
+                        analysis = transcribe_file_deepgram(
+                            audio_path,
+                            get_secret("DEEPGRAM_API_KEY"),
+                            language=language_code,
+                            diarize=diarize_setting,
+                            want_sentiment=sentiment_setting,
+                            want_insights=insights_setting,
+                            progress_cb=_progress,
+                        )
+                        transcription = analysis["transcript"]
+                    else:
+                        transcription = transcribe_large_file_whisper(
+                            audio_path,
+                            language=language_code,
+                            progress_bar=progress_bar,
+                            status_text=status_text,
+                        )
                 else:
                     st.error("❌ Internal error: audio_path is None.")
                     return
@@ -1335,6 +991,7 @@ def main():
                 progress_bar.progress(1.0)
                 status_text.text("✅ Transcription completed!")
                 st.session_state.transcription = transcription
+                st.session_state.analysis = analysis
                 st.session_state.filename = uploaded_file.name
                 #st.success("🎉 Transcription completed successfully!")
             except Exception as e:
@@ -1345,10 +1002,53 @@ def main():
     # st.markdown('<div style="margin-top:0.7rem;"></div>', unsafe_allow_html=True)
     # Show the bordered frame for transcription and controls only if there is a transcription
     if 'transcription' in st.session_state:
-        
+
         # Show transcription in a code block with copy button
         st.code(st.session_state.transcription, language=None)
-        
+
+        # Conversation analysis (Deepgram only). Rendered as text-labeled stat
+        # rows + native meters — identity always carried by text, never color.
+        analysis = st.session_state.get('analysis')
+        if analysis:
+            for warning in analysis.get("warnings", []):
+                st.caption(f"⚠️ {warning}")
+
+            insights = analysis.get("insights")
+            if insights:
+                with st.expander("📊 Métricas de conversación", expanded=True):
+                    for item in insights["feedback"]:
+                        st.markdown(f"- {item}")
+                    st.markdown("---")
+                    for speaker, s in sorted(insights["per_speaker"].items(), key=lambda kv: str(kv[0])):
+                        wpm_txt = f" · {s['wpm']:.0f} palabras/min" if s.get('wpm') else ""
+                        st.markdown(
+                            f"**Speaker {speaker}** — {s['talk_share'] * 100:.0f}% del habla · "
+                            f"{format_time(s['talk_time'])} · {s['words']} palabras{wpm_txt}"
+                        )
+                        st.progress(min(max(s['talk_share'], 0.0), 1.0))
+                    overall = insights["overall"]
+                    st.caption(
+                        f"{overall['n_speakers']} hablante(s) · {overall['total_words']} palabras · "
+                        f"{overall['interruptions']} interrupciones · "
+                        f"{overall['silence_ratio'] * 100:.0f}% de silencio · "
+                        f"{overall['questions']} preguntas"
+                    )
+
+            sentiment = analysis.get("sentiment")
+            if sentiment:
+                with st.expander("😊 Sentimiento (Deepgram)", expanded=True):
+                    avg = sentiment["average"]
+                    label_es = {"positive": "😊 Positivo", "neutral": "😐 Neutral",
+                                "negative": "🙁 Negativo"}.get(avg["sentiment"], avg["sentiment"])
+                    st.markdown(f"**Tono general:** {label_es} (score {avg['sentiment_score']:+.2f})")
+                    emoji_line = sentiment_timeline_emoji(sentiment)
+                    if emoji_line:
+                        st.markdown(f"**Evolución** (inicio → fin): {emoji_line}")
+                    for speaker, sp in sorted(sentiment["per_speaker"].items(), key=lambda kv: str(kv[0])):
+                        lab = {"positive": "positivo", "neutral": "neutral",
+                               "negative": "negativo"}.get(sp["sentiment"], sp["sentiment"])
+                        st.markdown(f"- Speaker {speaker}: {lab} ({sp['sentiment_score']:+.2f})")
+
         st.markdown('<div style="height:0.5rem;"></div>', unsafe_allow_html=True)
         # Full-width download button (better on mobile than a half-width column).
         # st.code() already provides a built-in copy button, so no second column is needed.
@@ -1360,6 +1060,17 @@ def main():
             mime="text/plain",
             help="Download the transcription as a text file"
         )
+        if analysis and (analysis.get("insights") or analysis.get("sentiment")):
+            report_data = build_report(
+                analysis, filename=st.session_state.get('filename', '')
+            ).encode('utf-8')
+            st.download_button(
+                label="📄 Descargar informe (transcript + análisis)",
+                data=report_data,
+                file_name=f"{st.session_state.filename.split('.')[0]}_report.txt",
+                mime="text/plain",
+                help="Transcripción más métricas de conversación y sentimiento en un solo archivo"
+            )
     # If no transcription, do not show the frame, placeholder, or empty text area
 
     # Model Selector (subtitle + select box, no bubble)
@@ -1386,6 +1097,25 @@ def main():
         value=True,  # Default to enabled
         disabled=(model == "OpenAI Whisper"),
         help="Enable speaker identification to show who said what. Only works with Deepgram model."
+    )
+
+    # Conversation analysis toggles (Deepgram only)
+    insights_enabled = st.checkbox(
+        "📊 Métricas de conversación",
+        key='insights',
+        value=True,
+        disabled=(model == "OpenAI Whisper"),
+        help="Tiempo de habla por hablante, ritmo (palabras/min), interrupciones, "
+             "monólogos y muletillas, con observaciones. Funciona en español e inglés."
+    )
+    sentiment_enabled = st.checkbox(
+        "😊 Análisis de sentimiento (solo audio en inglés)",
+        key='sentiment',
+        value=False,
+        disabled=(model == "OpenAI Whisper"),
+        help="Análisis de sentimiento de Deepgram (positivo/neutral/negativo por tramo "
+             "y por hablante). Deepgram solo lo ofrece para audio en inglés; "
+             "para español se omite con un aviso."
     )
 
     # Other Info (polished, centered, no bubble)

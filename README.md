@@ -4,21 +4,28 @@ A powerful audio transcription application built with Streamlit that supports mu
 
 ## 🚀 Features
 
-- **Multiple Audio Formats**: MP3, WAV, M4A (with automatic conversion)
-- **Transcription Services**: OpenAI Whisper and Deepgram
-- **Web Interface**: Beautiful Streamlit-based UI
-- **Automatic Conversion**: M4A files are automatically converted to MP3 before transcription
-- **Large File Support**: Automatic chunking for files larger than 24MB
+- **Multiple Audio Formats**: MP3, WAV, M4A, MP4 (with automatic conversion)
+- **Transcription Services**: Deepgram (nova-3 with automatic fallback) and OpenAI Whisper
+- **Speaker Diarization**: `[Speaker N]:` labels via Deepgram's batch diarizer v2, with speaker IDs kept consistent across chunks
+- **Conversation Insights**: per-speaker talk share, pace (words/min), interruptions, monologues, filler words (muletillas) + feedback bullets
+- **Sentiment Analysis**: Deepgram sentiment (English audio only) — overall, per speaker, and a timeline
+- **Web Interface**: Mobile-first Streamlit UI with trimming and Google Drive input
+- **Large File Support**: Deepgram accepts big files directly (chunking only >150MB, with silence-aware cuts); Whisper chunks at 24MB
 - **Progress Tracking**: Real-time progress updates during transcription
 
 ## 📁 Project Structure
 
 ```
 VoiceTranscriber/
-├── AppTranscribe.py          # Main Streamlit application
+├── AppTranscribe.py          # Main Streamlit application (UI + upload/trim flow)
+├── core/
+│   └── transcription.py      # Shared Deepgram + diarization + analysis logic
+├── tests/
+│   └── test_transcription.py # Unit tests (python -m unittest discover tests)
 ├── scripts/                  # Supporting scripts and utilities
+│   ├── deepgram_transcribe_cli.py # Deepgram CLI (diarization/sentiment/insights)
 │   ├── convert_m4a_to_mp3.py    # M4A to MP3 converter
-│   ├── transcribe.py             # Command-line transcription script
+│   ├── transcribe.py             # Legacy OpenAI-only batch script
 │   ├── setup.ps1                 # Windows PowerShell setup
 │   ├── setup.bat                 # Windows batch setup
 │   └── setup.sh                  # Linux/Mac setup
@@ -78,13 +85,30 @@ python scripts/convert_m4a_to_mp3.py
 python scripts/convert_m4a_to_mp3.py input.m4a output.mp3
 ```
 
-#### Command Line Transcription
+#### Command Line Transcription (Deepgram, recommended)
+```bash
+# Diarized transcript + conversation report (output/<stem>_transcript.txt / _report.txt)
+python scripts/deepgram_transcribe_cli.py --file "path/to/meeting.mp4" --language es
+
+# English audio with Deepgram sentiment analysis
+python scripts/deepgram_transcribe_cli.py --file meeting.mp3 --language en --sentiment
+
+# Plain transcript, no diarization/insights
+python scripts/deepgram_transcribe_cli.py --file audio.wav --no-diarize --no-insights
+```
+
+#### Command Line Transcription (legacy Whisper batch)
 ```bash
 # Process all files in input/ folder
 python scripts/transcribe.py
 
 # Process specific file
 python scripts/transcribe.py --file "path/to/audio.wav"
+```
+
+#### Tests
+```bash
+python -m unittest discover tests
 ```
 
 ## 📋 Supported Formats
@@ -108,9 +132,9 @@ python scripts/transcribe.py --file "path/to/audio.wav"
 ### Transcription Models
 
 1. **Deepgram** (Default)
-   - Better for real-time transcription
-   - Supports multiple languages
-   - Good for Spanish content
+   - nova-3 first, with automatic fallback (nova-2 → base → language auto-detect)
+   - Speaker diarization (batch diarizer v2), conversation insights, sentiment (English)
+   - Good for Spanish content (`language=es` on nova-3)
 
 2. **OpenAI Whisper**
    - Excellent accuracy
@@ -119,9 +143,8 @@ python scripts/transcribe.py --file "path/to/audio.wav"
 
 ### File Size Limits
 
-- **Default**: 24MB maximum file size
-- **Large files**: Automatically split into chunks
-- **Configurable**: Adjustable in the web interface
+- **Deepgram**: files are sent in a single request up to ~150MB (Deepgram accepts up to 2GB); larger files are split at silence points and speaker IDs are remapped across chunks
+- **OpenAI Whisper**: automatically split into chunks above 24MB (25MB API limit)
 
 ## 📖 Examples
 
