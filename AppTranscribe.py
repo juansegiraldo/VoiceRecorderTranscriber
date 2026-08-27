@@ -5,6 +5,7 @@ import requests
 from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
+import hmac
 import html
 import json
 import re
@@ -1054,8 +1055,55 @@ def render_results():
     st.caption("«Generar acta» llega con la Fase 1 del roadmap; de momento puedes usar el GPT del pie de página.")
 
 
+def _password_gate() -> bool:
+    """Block the whole app behind a single shared password.
+
+    The app is deployed at a public URL but is only meant for two people, so
+    this is a private-by-default door, not a user system: one secret
+    (APP_PASSWORD) shared by both. Returns True when the visitor is allowed in.
+
+    The unlocked flag lives in st.session_state, so it lasts exactly as long as
+    the browser tab: a refresh or a later visit asks again. If APP_PASSWORD is
+    not configured the app stays OPEN (fail-open) — that keeps local dev and
+    the CLI scripts working without a secret, and the Streamlit Cloud secret is
+    what actually closes the public deployment.
+    """
+    if not get_secret("APP_PASSWORD"):
+        return True  # no password configured (local dev) -> no gate
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.markdown(
+        '<div class="vt-brand"><span class="vt-wave"><i></i><i></i><i></i></span>'
+        'VoiceTranscriber</div>'
+        '<div class="vt-tagline">Acceso privado</div>',
+        unsafe_allow_html=True,
+    )
+
+    # A form so that Enter submits (mobile keyboards show "go" instead of a
+    # newline) and the password isn't re-checked on every keystroke rerun.
+    with st.form("login", clear_on_submit=True):
+        password = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Entrar", type="primary")
+
+    if submitted:
+        # compare_digest keeps the check constant-time; str() guards against a
+        # non-string secret (TOML would hand us an int for an all-digit value).
+        if hmac.compare_digest(password, str(get_secret("APP_PASSWORD"))):
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+
+    return False
+
+
 def main():
     st.markdown(V2_CSS, unsafe_allow_html=True)
+
+    # Private deployment: nothing below renders until the shared password is in.
+    if not _password_gate():
+        return
 
     # Complete any pending Google Drive OAuth redirect before rendering the UI.
     _handle_drive_oauth_callback()
