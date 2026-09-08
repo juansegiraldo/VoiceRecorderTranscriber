@@ -15,15 +15,48 @@ import logging
 import imageio_ffmpeg
 import subprocess
 
-# Patch pydub to use imageio-ffmpeg's bundled ffmpeg/ffprobe BEFORE importing AudioSegment
+# Patch pydub to use imageio-ffmpeg's bundled ffmpeg BEFORE importing AudioSegment.
+#
+# imageio-ffmpeg bundles ffmpeg but NOT ffprobe, and pydub uses ffprobe purely to
+# sniff metadata in AudioSegment.from_file(). We therefore point pydub at a real
+# ffprobe when the platform has one, and otherwise fall back to decoding with an
+# explicit format so the ffprobe path is never taken (see decode_audio_file).
+#
+# This is deliberately independent of packages.txt/apt: Streamlit Cloud's base
+# image has periodically failed `apt-get update` (expired Debian release files),
+# which aborted the whole deploy. The app must not need apt to work.
 ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 print(f"Using FFmpeg from: {ffmpeg_path}")
 from pydub.utils import which
 from pydub import AudioSegment
 AudioSegment.converter = ffmpeg_path
 AudioSegment.ffmpeg = ffmpeg_path
+
+# System ffprobe if present (packages.txt/apt, Homebrew, PATH); else None.
+ffprobe_path = which("ffprobe")
+if ffprobe_path:
+    AudioSegment.ffprobe = ffprobe_path
+ffprobe_available = bool(ffprobe_path)
 print(f"Patched AudioSegment.converter to: {AudioSegment.converter}")
 print(f"Patched AudioSegment.ffmpeg to: {AudioSegment.ffmpeg}")
+print(f"ffprobe: {ffprobe_path or 'not found (using explicit-format decode fallback)'}")
+
+
+def decode_audio_file(path, format=None):
+    """AudioSegment.from_file that also works when ffprobe is unavailable.
+
+    pydub only needs ffprobe to auto-detect the container. Without it we pass an
+    explicit format (derived from the extension) so ffmpeg alone can decode.
+    """
+    if ffprobe_available:
+        return AudioSegment.from_file(path, format=format) if format else AudioSegment.from_file(path)
+
+    fmt = format
+    if not fmt:
+        ext = str(path).rsplit(".", 1)[-1].lower() if "." in str(path) else ""
+        # pydub/ffmpeg demuxer names; m4a and mp4 share the mov/mp4 demuxer.
+        fmt = {"m4a": "mp4", "mp4": "mp4", "mp3": "mp3", "wav": "wav"}.get(ext) or ext or "mp3"
+    return AudioSegment.from_file(path, format=fmt)
 
 # Shared transcription/diarization/analysis core (ROADMAP Phase 0 extraction —
 # the same module backs scripts/deepgram_transcribe_cli.py). Imported after the
@@ -61,16 +94,25 @@ def get_secret(key, default=None):
 
 # Check for FFmpeg availability
 def check_ffmpeg():
-    """Check if FFmpeg is available for audio processing."""
+    """Check whether a usable ffmpeg binary is present.
+
+    Only ffmpeg matters here: it does the actual decoding/encoding. Missing
+    ffprobe is NOT fatal any more — decode_audio_file() works around it — so it
+    must not hide the M4A/MP4 upload types.
+    """
     try:
-        from pydub import AudioSegment
-        # Try to load a simple audio file to test FFmpeg
-        test_audio = AudioSegment.silent(duration=100)
+        if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+            return False
+        subprocess.run(
+            [ffmpeg_path, "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
         return True
     except Exception as e:
-        if "ffprobe" in str(e) or "ffmpeg" in str(e):
-            return False
-        return True
+        logger.warning(f"FFmpeg check failed: {e}")
+        return False
 
 # Check FFmpeg at startup
 ffmpeg_available = check_ffmpeg()
@@ -101,7 +143,7 @@ def trim_audio_file(input_path: str, start_time_ms: int, end_time_ms: int, outpu
     """
     try:
         # Load the audio file
-        audio = AudioSegment.from_file(input_path)
+        audio = decode_audio_file(input_path)
         
         # Ensure times are within bounds
         start_time_ms = max(0, min(start_time_ms, len(audio)))
@@ -224,7 +266,7 @@ def convert_m4a_to_mp3(input_path: str, output_path: str | None = None, bitrate:
             raise Exception("M4A conversion is not available on this server. Please convert your M4A files to MP3 or WAV format before uploading. You can use online converters or the standalone converter script in the scripts/ folder.")
         
         # Load the audio file
-        audio = AudioSegment.from_file(str(input_file), format="m4a")
+        audio = decode_audio_file(str(input_file), format="m4a" if ffprobe_available else "mp4")
         
         # Export as MP3
         audio.export(str(output_file), format="mp3", bitrate=bitrate)
@@ -1221,7 +1263,7 @@ def main():
                     audio_path = tmp_file_path
                     st.session_state.converted_mp3_path = None
                     st.session_state.converted_mp3_file_key = None
-                audio = AudioSegment.from_file(audio_path)
+                audio = decode_audio_file(audio_path)
                 duration_ms = len(audio)
                 duration_seconds = duration_ms / 1000
                 if file_extension != 'm4a' and file_extension != 'mp4':

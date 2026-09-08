@@ -629,8 +629,17 @@ def _split_audio_with_durations(
         return [file_path], [], None
 
     from pydub import AudioSegment  # lazy: only needed when actually splitting
+    from pydub.utils import which
 
-    audio = AudioSegment.from_file(file_path)
+    # ffprobe may be absent (imageio-ffmpeg bundles ffmpeg only, and the app must
+    # not depend on apt/packages.txt). pydub needs ffprobe purely to sniff the
+    # container, so pass an explicit format derived from the extension instead.
+    if which("ffprobe"):
+        audio = AudioSegment.from_file(file_path)
+    else:
+        ext = str(file_path).rsplit(".", 1)[-1].lower() if "." in str(file_path) else ""
+        fmt = {"m4a": "mp4", "mp4": "mp4", "mp3": "mp3", "wav": "wav"}.get(ext) or ext or "mp3"
+        audio = AudioSegment.from_file(file_path, format=fmt)
     num_chunks = math.ceil(file_size / max_size_bytes)
     chunk_duration = len(audio) // num_chunks
 
